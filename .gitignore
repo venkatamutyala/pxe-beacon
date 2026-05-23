@@ -1,1 +1,7 @@
 PLAN.md
+
+# build artifacts
+/pxe-beacon
+/dist/
+*.test
+*.out
