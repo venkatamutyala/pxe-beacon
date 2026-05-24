@@ -194,3 +194,81 @@ Decisions to flag for review:
   yet. Good enough to silence the failure-path hint when any TFTP
   follow-up arrives.
 
+---
+
+## M3 — HTTP server + chain script — **PASS** (Tier 0 + Tier 1)
+
+What I did:
+- `internal/httpd/httpd.go`: net/http server. Endpoints:
+  - `/netboot.xyz.efi`, `/netboot.xyz-snponly.efi`,
+    `/netboot.xyz-arm64.efi`, `/netboot.xyz.kpxe` and their friendly
+    aliases (`/ipxe.efi`, `/undionly.kpxe`).
+  - `/boot.ipxe` — rendered Go text/template with `{AdvertisedIP,
+    ChainURL, SetCrossCert}`.
+  - `/` — short status page so a `curl localhost:8080` works as a
+    healthcheck.
+- **Content-Length is set explicitly on every response.** PLAN section
+  0 calls out UEFI HTTP-boot pickiness; we use `bytes.Reader` +
+  `http.ServeContent` for binaries and a pre-rendered buffer for the
+  script so chunked encoding never happens.
+- `-crosscert` flag wired through to the template (PLAN section 0
+  gotcha: older iPXE builds need `set crosscert` for HTTPS).
+- `-ipxe-script <path>` lets operators override the embedded
+  template with a file on disk.
+- Tracker.NoteServed called on each successful GET to keep the
+  proxyDHCP failure-path hint quiet.
+- Wired into main alongside proxyDHCP and TFTP — three goroutines, one
+  shared shutdown.
+
+Gate verification:
+
+Tier 0 (`go test`):
+
+```
+=== RUN   TestHTTP_ServesIPXEBinaryWithContentLength  PASS
+=== RUN   TestHTTP_RendersBootScript                  PASS
+=== RUN   TestHTTP_404UnknownPath                     PASS
+=== RUN   TestHTTP_RootStatusPage                     PASS
+=== RUN   TestHTTP_CrossCertEmittedWhenEnabled        PASS
+PASS    github.com/venkatamutyala/pxe-beacon/internal/httpd
+```
+
+Tier 1 (`curl`, PLAN's primary M3 gate):
+
+```
+$ curl -sI http://127.0.0.1:8080/netboot.xyz.efi
+HTTP/1.1 200 OK
+Content-Length: 1171456
+Content-Type: application/octet-stream
+
+$ curl -s http://127.0.0.1:8080/boot.ipxe
+#!ipxe
+# pxe-beacon default chain script — templated by the HTTP server.
+echo pxe-beacon: handing off to iPXE script
+echo pxe-beacon: server=127.0.0.1 chain=https://boot.netboot.xyz/menu.ipxe
+chain --autofree https://boot.netboot.xyz/menu.ipxe ||
+echo pxe-beacon: chain failed: ${errno}
+echo Press a key to drop to iPXE shell.
+shell
+```
+
+Server log:
+
+```
+http      listening on 127.0.0.1:8080 (script path /boot.ipxe)
+http      HEAD /netboot.xyz.efi -> 200, 1171456 bytes
+http      GET /boot.ipxe -> 200, 561 bytes (127.0.0.1:39028)
+http      GET / -> 200, 342 bytes
+```
+
+Decisions to flag for review:
+- **Aliases (`/ipxe.efi` etc.)** are served alongside the canonical
+  netboot.xyz names. The OFFER sends the canonical names; aliases
+  exist so `curl localhost:8080/ipxe.efi` works for ad-hoc testing
+  and matches the most common firmware naming guesses.
+- **Per-host MAC-scoped HTTP paths** are not implemented — Phase 2.
+- The previous `boot.ipxe` template had its "documentation" comments
+  written using `{{.X}}` syntax which caused the rendered file to show
+  expanded values inside the comment block. Tidied the template so
+  comments are just comments.
+

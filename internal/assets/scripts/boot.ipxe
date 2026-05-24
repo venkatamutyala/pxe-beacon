@@ -1,10 +1,6 @@
 #!ipxe
-# pxe-beacon default chain script.
-#
-# Templated at request time. Variables (Go text/template):
-#   {{.AdvertisedIP}} - the IP this server is reachable at
-#   {{.ChainURL}}     - the URL to chainload (default netboot.xyz)
-#   {{.SetCrossCert}} - true to add `crosscert` for older iPXE builds
+# pxe-beacon default chain script — templated by the HTTP server.
+# Template variables (Go text/template): AdvertisedIP, ChainURL, SetCrossCert.
 
 echo pxe-beacon: handing off to iPXE script
 echo pxe-beacon: server={{.AdvertisedIP}} chain={{.ChainURL}}

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/venkatamutyala/pxe-beacon/internal/assets"
+	"github.com/venkatamutyala/pxe-beacon/internal/httpd"
 	"github.com/venkatamutyala/pxe-beacon/internal/narrlog"
 	"github.com/venkatamutyala/pxe-beacon/internal/netinfo"
 	"github.com/venkatamutyala/pxe-beacon/internal/proxydhcp"
@@ -34,6 +35,7 @@ func main() {
 		flagIPXEScript = flag.String("ipxe-script", "", "path to a custom boot.ipxe template (overrides embedded default)")
 		flagAdvIP      = flag.String("advertise-ip", "", "override the advertised IPv4 (auto-detect if empty)")
 		flagTFTPListen = flag.String("tftp-listen", "0.0.0.0:69", "TFTP listen address (host:port)")
+		flagCrossCert  = flag.Bool("crosscert", false, "emit `set crosscert http://ca.ipxe.org/auto` in boot.ipxe (helps older iPXE builds with HTTPS netboot.xyz)")
 		flagPrintVer   = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -116,9 +118,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	errc := make(chan error, 2)
+	httpSrv, err := httpd.New(httpd.Options{
+		Listen:         fmt.Sprintf("%s:%d", *flagListen, *flagHTTPPort),
+		AdvertisedIP:   advIP.String(),
+		ChainURL:       *flagChainURL,
+		IPXEScriptPath: cfg.IPXEScriptPath,
+		IPXEScriptFile: *flagIPXEScript,
+		SetCrossCert:   *flagCrossCert,
+		Logger:         log,
+		Tracker:        lst,
+	})
+	if err != nil {
+		log.Errorf("init http: %v", err)
+		os.Exit(1)
+	}
+
+	errc := make(chan error, 3)
 	go func() { errc <- lst.Serve(ctx) }()
 	go func() { errc <- tftpSrv.Serve(ctx) }()
+	go func() { errc <- httpSrv.Serve(ctx) }()
 
 	log.Infof("ready — press Ctrl-C to exit")
 	select {
