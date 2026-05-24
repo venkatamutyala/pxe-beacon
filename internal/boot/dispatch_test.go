@@ -56,8 +56,8 @@ machines:
 	for _, want := range []string{
 		// Dispatch line for the user's MAC.
 		"iseq ${net0/mac:hexhyp} 58-47-ca-70-c7-c9 && goto m_venkat-1",
-		// v0.5.2: also matches against the boot-NIC alias for multi-NIC boxes.
-		"iseq ${mac:hexhyp} 58-47-ca-70-c7-c9 && goto m_venkat-1",
+		// v0.5.4: phone-home probe before iseq dispatch.
+		"/debug/iPXE-state?stage=before-iseq",
 		// Per-machine block label.
 		":m_venkat-1",
 		// dhcp inside the arm (PXE expert fix #1).

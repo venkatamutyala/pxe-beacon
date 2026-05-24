@@ -44,20 +44,30 @@ func RenderDispatch(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("# Each machine matches by MAC and kernel-boots its target OS")
 	w("# directly. No HTTP chain dependency.")
 	w("")
-	// v0.5.2: prominent diagnostic header. Prints what iPXE actually
-	// sees for the MAC across the variants we're going to iseq
-	// against. If the iseq below doesn't match, this banner tells
-	// the operator exactly WHY (uppercase vs lowercase, wrong NIC,
-	// firmware quirk). The 'echo ===' framing makes it survive
-	// scroll-off long enough to read on slow consoles.
 	w("echo ==============================================")
-	w("echo pxe-beacon dispatch (v0.5.3)")
-	w("echo   mac (boot NIC) = ${mac}")
-	w("echo   mac:hexhyp     = ${mac:hexhyp}")
+	w("echo pxe-beacon dispatch (v0.5.4)")
 	w("echo   net0/mac       = ${net0/mac}")
 	w("echo   net0/mac:hxhyp = ${net0/mac:hexhyp}")
 	w("echo   net1/mac:hxhyp = ${net1/mac:hexhyp}")
 	w("echo ==============================================")
+	w("")
+	// v0.5.4: phone-home. Before iseq dispatch, hit the pxe-beacon
+	// /debug/iPXE-state HTTP route with every MAC + network setting
+	// iPXE knows about. The SERVER LOGS this. Diagnosing 'iseq does
+	// not match' or 'kernel fetch hangs' problems no longer requires
+	// reading the client's screen — it lands directly in
+	// pxe-beacon's stdout.
+	//
+	// We do an explicit dhcp first so ${ip}/${gateway}/${dns} are
+	// populated (firmware DHCP state isn't always carried over).
+	// Chain-style probe (not imgfetch) because chain supports query
+	// strings on every iPXE build; imgfetch's URL handling varies.
+	fmt.Fprintf(&buf, "echo pxe-beacon: phoning home to %s:%d/debug/iPXE-state (server logs the values)\n",
+		ctx.AdvertisedIP, ctx.HTTPPort)
+	w("dhcp || echo pxe-beacon: probe dhcp failed (continuing anyway)")
+	fmt.Fprintf(&buf,
+		"chain --autofree http://%s:%d/debug/iPXE-state?stage=before-iseq&mac=${net0/mac:hexhyp}&net0=${net0/mac:hexhyp}&net1=${net1/mac:hexhyp}&net2=${net2/mac:hexhyp}&net3=${net3/mac:hexhyp}&ip=${ip}&gateway=${gateway}&dns=${dns}&platform=${platform}&buildarch=${buildarch}&version=${version} || echo pxe-beacon: phone-home failed (pxe-beacon unreachable from this NIC?)\n",
+		ctx.AdvertisedIP, ctx.HTTPPort)
 	w("")
 
 	machines := []fleet.Machine{}
@@ -69,21 +79,17 @@ func RenderDispatch(f *fleet.Fleet, ctx DispatchContext) []byte {
 	// Stable order — sort by MAC for diff-ability.
 	sort.Slice(machines, func(i, j int) bool { return machines[i].MAC < machines[j].MAC })
 
-	// Dispatch table. We compare against MULTIPLE MAC variants so
-	// the iseq matches regardless of which NIC iPXE numbers as the
-	// boot NIC (net0/net1/net2/net3) and against the special
-	// ${mac:hexhyp} setting (which refers to whichever NIC iPXE is
-	// currently using, not a specific net0). This is robust on
-	// multi-NIC servers where the PXE NIC isn't always net0.
-	w("# ----- per-MAC dispatch (multi-NIC safe) -----")
+	// Dispatch table. We compare against each NIC iPXE has discovered
+	// (net0..net3). The dropped `${mac:hexhyp}` variant from v0.5.2
+	// turned out to not be a standard iPXE setting in some builds —
+	// it expanded to empty and the iseq fell through silently or
+	// parse-errored. The /debug/iPXE-state phone-home logs which
+	// variant actually carries the booting MAC.
+	w("# ----- per-MAC dispatch (multi-NIC safe via net0..net3) -----")
 	for _, m := range machines {
 		label := labelOf(m.MAC, m.Profile.Name)
 		hyp := strings.ReplaceAll(m.MAC, ":", "-")
-		// One iseq per (machine × NIC-variant). Each one trails
-		// with `||` so iPXE chains to the next on miss. After the
-		// last attempt for the last machine, fall through to
-		// target_default.
-		for _, nic := range []string{"mac:hexhyp", "net0/mac:hexhyp", "net1/mac:hexhyp", "net2/mac:hexhyp", "net3/mac:hexhyp"} {
+		for _, nic := range []string{"net0/mac:hexhyp", "net1/mac:hexhyp", "net2/mac:hexhyp", "net3/mac:hexhyp"} {
 			fmt.Fprintf(&buf, "iseq ${%s} %s && goto %s ||\n", nic, hyp, label)
 		}
 	}

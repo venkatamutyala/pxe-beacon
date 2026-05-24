@@ -190,6 +190,12 @@ func (s *Server) routes() {
 	// non-loopback IPs on the same host; curl-friendly diagnostic.
 	s.mux.HandleFunc("GET /debug/tftp/autoexec.ipxe", s.handleDebugAutoexec)
 
+	// v0.5.4: iPXE phone-home. The dispatch script hits this URL
+	// before the iseq dispatch so we LOG what iPXE's settings actually
+	// expand to (mac, net0/mac, net1/mac, ip, gateway, dns) — much
+	// more reliable than reading the screen during a fast boot.
+	s.mux.HandleFunc("GET /debug/iPXE-state", s.handleDebugIPXEState)
+
 	// Admin routes — loopback-only, CSRF-guarded on POST. Wildcard
 	// {name...} captures slash-containing template paths like
 	// "defaults/debian-preseed.cfg".
@@ -522,6 +528,43 @@ func (s *Server) handleInstallerDone(w http.ResponseWriter, r *http.Request) {
 // handleAsset serves a file from DataDir/<target>/<file>. The target
 // + file names are validated to reject path traversal (cache.AssetPath
 // does the check). Used by the Ubuntu autoexec templates to fetch
+// handleDebugIPXEState logs what iPXE's settings actually expand to.
+// The dispatch script chains here before the iseq dispatch, passing
+// mac variants + dhcp results as query params. Critical for
+// diagnosing 'iseq does not match' problems on multi-NIC or
+// quirky-firmware boxes. Returns an empty iPXE script so chain is
+// a no-op.
+func (s *Server) handleDebugIPXEState(w http.ResponseWriter, r *http.Request) {
+	// Log every query param the iPXE script sent. The most useful
+	// fields are mac/net0/net1 (the MAC iPXE actually evaluates) and
+	// ip/gateway/dns (the network state after the script's dhcp).
+	q := r.URL.Query()
+	pairs := []string{}
+	for _, k := range []string{"stage", "mac", "net0", "net1", "net2", "net3", "ip", "gateway", "dns", "platform", "buildarch", "version"} {
+		if v := q.Get(k); v != "" {
+			pairs = append(pairs, fmt.Sprintf("%s=%q", k, v))
+		}
+	}
+	// Anything else passed gets dumped too (so future probes don't
+	// need a code change).
+	for k, vs := range q {
+		known := false
+		for _, kk := range []string{"stage", "mac", "net0", "net1", "net2", "net3", "ip", "gateway", "dns", "platform", "buildarch", "version"} {
+			if k == kk {
+				known = true
+				break
+			}
+		}
+		if !known && len(vs) > 0 {
+			pairs = append(pairs, fmt.Sprintf("%s=%q", k, vs[0]))
+		}
+	}
+	s.log.Infof("iPXE-state from %s: %s", r.RemoteAddr, strings.Join(pairs, " "))
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("#!ipxe\n"))
+}
+
 // handleDebugAutoexec returns the same bytes TFTP serves for
 // autoexec.ipxe. Lets operators curl the dispatch script when the
 // macOS BSD tftp client hangs (a known issue talking to non-loopback
