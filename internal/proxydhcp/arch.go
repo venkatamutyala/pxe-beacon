@@ -59,13 +59,21 @@ var archTable = map[iana.Arch]ArchProfile{
 		IPXEKind:  assets.IPXELegacyBIOS,
 		BootFile:  "netboot.xyz.kpxe",
 	},
-	// UEFI x86_64 — TFTP, netboot.xyz EFI build. The most common
-	// modern PXE arch (0x07).
+	// UEFI x86_64 — TFTP, snponly build. The most common modern PXE
+	// arch (0x07). We deliberately serve the SNP-only build (not the
+	// all-drivers .efi) because the all-drivers build re-initializes
+	// the NIC from scratch on top of UEFI's existing setup, which on
+	// AMI/Phoenix firmware glitches the shared PCI USB controller and
+	// kills USB-keyboard input inside iPXE/netboot.xyz. snponly uses
+	// UEFI's existing SNP wrapper for networking — UEFI keeps owning
+	// the hardware, USB stays alive. Wire-confirmed against a user
+	// report: USB-stick boot of the same iPXE worked (no PCI re-init);
+	// PXE boot with the all-drivers build killed the keyboard.
 	iana.EFI_X86_64: {
 		Arch:      iana.EFI_X86_64,
 		Transport: TransportTFTP,
-		IPXEKind:  assets.IPXEEFIx64,
-		BootFile:  "netboot.xyz.efi",
+		IPXEKind:  assets.IPXESNPOnly,
+		BootFile:  "netboot.xyz-snponly.efi",
 	},
 	// UEFI ARM64 — TFTP, arm64 EFI build.
 	iana.EFI_ARM64: {
@@ -76,12 +84,13 @@ var archTable = map[iana.Arch]ArchProfile{
 	},
 	// UEFI HTTP-boot variants — firmware fetches over HTTP directly.
 	// option-93 0x10 (16) is x86_64 HTTP boot; this is what the PLAN
-	// calls out as the second canonical case.
+	// calls out as the second canonical case. Same snponly reasoning
+	// as EFI_X86_64 above — avoid PCI re-init that kills USB keyboards.
 	iana.EFI_X86_64_HTTP: {
 		Arch:      iana.EFI_X86_64_HTTP,
 		Transport: TransportHTTP,
-		IPXEKind:  assets.IPXEEFIx64,
-		BootFile:  "netboot.xyz.efi",
+		IPXEKind:  assets.IPXESNPOnly,
+		BootFile:  "netboot.xyz-snponly.efi",
 	},
 	iana.EFI_ARM64_HTTP: {
 		Arch:      iana.EFI_ARM64_HTTP,

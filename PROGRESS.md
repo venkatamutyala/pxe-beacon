@@ -475,3 +475,43 @@ preserves the iPXE-BINL motivation so future readers don't undo it.
 Full suite passes (`go test ./...`, 14 unit + 2 e2e in proxydhcp).
 Tagged and released via the existing GitHub Actions release workflow.
 
+---
+
+## v0.1.3 — serve `netboot.xyz-snponly.efi` for x86_64 UEFI
+
+The v0.1.2 user reported that PXE-booting an AMI/Phoenix-firmware
+client through pxe-beacon left the netboot.xyz menu visible but the
+USB keyboard dead, while booting the *same* netboot.xyz iPXE from a
+USB stick worked fine.
+
+**Why USB worked, PXE didn't:** the full `netboot.xyz.efi` build we
+were serving contains iPXE's own native PCI/NIC drivers. When loaded
+via PXE, iPXE has to bring up networking immediately to chainload
+`boot.netboot.xyz/menu.ipxe`, so those native drivers re-initialize
+the NIC from scratch on top of whatever UEFI already had running. On
+AMI/Phoenix firmware that re-init glitches the shared PCI USB
+controller — USB keyboard loses its association and goes dead. When
+loaded via USB, iPXE doesn't need networking immediately and doesn't
+touch PCI, so the keyboard survives.
+
+**Fix:** serve `netboot.xyz-snponly.efi` instead. The snponly build is
+iPXE compiled with `--snponly` — it has no native NIC drivers and uses
+UEFI's existing Simple Network Protocol wrapper. UEFI keeps owning the
+NIC and the USB controller; iPXE never touches PCI. Keyboard stays
+alive.
+
+**Changed in `internal/proxydhcp/arch.go`:** swapped IPXEKind +
+BootFile for both `iana.EFI_X86_64` (TFTP) and `iana.EFI_X86_64_HTTP`
+(HTTP boot). The snponly binary has been embedded since M0; this just
+points the arch table at it.
+
+**Tests updated:** four assertions in `proxydhcp_test.go` and
+`listener_e2e_test.go` flipped to expect `netboot.xyz-snponly.efi`.
+Full suite green (16 unit + 2 e2e).
+
+**Trade-off:** snponly requires UEFI to have the network stack already
+initialized — but every UEFI machine that supports PXE has it, by
+definition. The all-drivers build remains embedded for future use
+(e.g. ia32 already uses snponly as best-effort; could expose a
+`-iPXE-build` flag later if anyone needs the all-drivers path).
+
