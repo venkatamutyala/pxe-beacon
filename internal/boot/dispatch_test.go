@@ -56,6 +56,8 @@ machines:
 	for _, want := range []string{
 		// Dispatch line for the user's MAC.
 		"iseq ${net0/mac:hexhyp} 58-47-ca-70-c7-c9 && goto m_venkat-1",
+		// v0.5.2: also matches against the boot-NIC alias for multi-NIC boxes.
+		"iseq ${mac:hexhyp} 58-47-ca-70-c7-c9 && goto m_venkat-1",
 		// Per-machine block label.
 		":m_venkat-1",
 		// dhcp inside the arm (PXE expert fix #1).
@@ -66,9 +68,11 @@ machines:
 		"url=http://10.69.69.218:8080/autoinstall/58-47-ca-70-c7-c9/preseed.cfg",
 		// Console for headless boards (PXE expert fix #7).
 		"console=tty0 console=ttyS0,115200n8",
-		// Narration with sleep before shell (PXE expert fix #8).
+		// Narration with sleep before reboot (PXE expert fix #8;
+		// v0.5.2 swapped shell→reboot so messages persist).
 		"echo pxe-beacon:",
-		"sleep 3",
+		"sleep 15",
+		"reboot",
 		// Default fallback arm still present.
 		":target_default",
 	} {

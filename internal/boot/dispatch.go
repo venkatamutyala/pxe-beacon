@@ -43,7 +43,21 @@ func RenderDispatch(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("# pxe-beacon dispatch — generated per request from fleet.yaml.")
 	w("# Each machine matches by MAC and kernel-boots its target OS")
 	w("# directly. No HTTP chain dependency.")
-	w("echo pxe-beacon: dispatch for ${net0/mac:hexhyp}")
+	w("")
+	// v0.5.2: prominent diagnostic header. Prints what iPXE actually
+	// sees for the MAC across the variants we're going to iseq
+	// against. If the iseq below doesn't match, this banner tells
+	// the operator exactly WHY (uppercase vs lowercase, wrong NIC,
+	// firmware quirk). The 'echo ===' framing makes it survive
+	// scroll-off long enough to read on slow consoles.
+	w("echo ==============================================")
+	w("echo pxe-beacon dispatch (v0.5.2)")
+	w("echo   mac (boot NIC) = ${mac}")
+	w("echo   mac:hexhyp     = ${mac:hexhyp}")
+	w("echo   net0/mac       = ${net0/mac}")
+	w("echo   net0/mac:hxhyp = ${net0/mac:hexhyp}")
+	w("echo   net1/mac:hxhyp = ${net1/mac:hexhyp}")
+	w("echo ==============================================")
 	w("")
 
 	machines := []fleet.Machine{}
@@ -55,15 +69,23 @@ func RenderDispatch(f *fleet.Fleet, ctx DispatchContext) []byte {
 	// Stable order — sort by MAC for diff-ability.
 	sort.Slice(machines, func(i, j int) bool { return machines[i].MAC < machines[j].MAC })
 
-	// Dispatch table.
-	w("# ----- per-MAC dispatch -----")
+	// Dispatch table. We compare against MULTIPLE MAC variants so
+	// the iseq matches regardless of which NIC iPXE numbers as the
+	// boot NIC (net0/net1/net2/net3) and against the special
+	// ${mac:hexhyp} setting (which refers to whichever NIC iPXE is
+	// currently using, not a specific net0). This is robust on
+	// multi-NIC servers where the PXE NIC isn't always net0.
+	w("# ----- per-MAC dispatch (multi-NIC safe) -----")
 	for _, m := range machines {
 		label := labelOf(m.MAC, m.Profile.Name)
-		// One `iseq` per machine. Trailing `||` is INTENTIONAL — iPXE
-		// chains them so the next condition is tried on miss. After
-		// the last `iseq`, fall through to the default arm.
-		fmt.Fprintf(&buf, "iseq ${net0/mac:hexhyp} %s && goto %s ||\n",
-			strings.ReplaceAll(m.MAC, ":", "-"), label)
+		hyp := strings.ReplaceAll(m.MAC, ":", "-")
+		// One iseq per (machine × NIC-variant). Each one trails
+		// with `||` so iPXE chains to the next on miss. After the
+		// last attempt for the last machine, fall through to
+		// target_default.
+		for _, nic := range []string{"mac:hexhyp", "net0/mac:hexhyp", "net1/mac:hexhyp", "net2/mac:hexhyp", "net3/mac:hexhyp"} {
+			fmt.Fprintf(&buf, "iseq ${%s} %s && goto %s ||\n", nic, hyp, label)
+		}
 	}
 	w("goto target_default")
 	w("")
@@ -74,14 +96,17 @@ func RenderDispatch(f *fleet.Fleet, ctx DispatchContext) []byte {
 	}
 
 	// Default arm — fall back to netboot.xyz embed.
-	w("# ----- default arm: machine not in fleet.yaml -----")
+	w("# ----- default arm: machine not in fleet.yaml (or iseq did not match) -----")
 	w(":target_default")
-	w("echo pxe-beacon: ${net0/mac:hexhyp} not in fleet.yaml — chaining netboot.xyz menu")
+	w("echo pxe-beacon: NO MATCH for ${net0/mac:hexhyp} in fleet.yaml")
+	w("echo pxe-beacon: if you EXPECTED a match, check that fleet.yaml's mac matches ${mac:hexhyp} above")
+	w("sleep 8")
 	w("dhcp || echo pxe-beacon: dhcp failed in default arm")
+	w("echo pxe-beacon: chaining https://boot.netboot.xyz/menu.ipxe ...")
 	w("chain --replace --autofree https://boot.netboot.xyz/menu.ipxe ||")
-	w("echo pxe-beacon: netboot.xyz chain failed; dropping to iPXE shell in 3s")
-	w("sleep 3")
-	w("shell")
+	w("echo pxe-beacon: netboot.xyz chain failed; rebooting in 15s")
+	w("sleep 15")
+	w("reboot")
 
 	return buf.Bytes()
 }
@@ -107,7 +132,7 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	w("")
 	fmt.Fprintf(buf, ":%s\n", label)
 	fmt.Fprintf(buf, "echo pxe-beacon: %s (%s) -> %s\n", name, m.MAC, m.Profile.Boot)
-	w("dhcp || echo pxe-beacon: dhcp failed; cannot fetch kernel && sleep 3 && shell")
+	w("dhcp || echo pxe-beacon: dhcp failed; cannot fetch kernel && sleep 15 && reboot")
 	w("imgfree")
 
 	switch m.Profile.Boot {
@@ -120,18 +145,21 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 			mirror, preseedURL, consoleArgs)
 		w("echo pxe-beacon: KERNEL FETCH FAILED — client cannot reach deb.debian.org over HTTP")
 		w("echo pxe-beacon: tried URL above; verify DNS + outbound HTTP from this NIC")
-		w("sleep 5")
-		w("shell")
+		w("sleep 15")
+		w("echo pxe-beacon: rebooting (use iPXE Ctrl+B during banner to break in for debug)")
+		w("reboot")
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching initrd: %s/initrd.gz\n", mirror)
 		fmt.Fprintf(buf, "initrd --name initrd.gz %s/initrd.gz ||\n", mirror)
 		w("echo pxe-beacon: INITRD FETCH FAILED — kernel got through but initrd did not")
-		w("sleep 5")
-		w("shell")
+		w("sleep 15")
+		w("echo pxe-beacon: rebooting (use iPXE Ctrl+B during banner to break in for debug)")
+		w("reboot")
 		w("echo pxe-beacon: handing control to d-i (boot)...")
 		fmt.Fprintf(buf, "boot ||\n")
 		w("echo pxe-beacon: BOOT FAILED — kernel image rejected (cmdline / arch mismatch?)")
-		w("sleep 5")
-		w("shell")
+		w("sleep 15")
+		w("echo pxe-beacon: rebooting (use iPXE Ctrl+B during banner to break in for debug)")
+		w("reboot")
 
 	case "debian-13":
 		mirror := "http://deb.debian.org/debian/dists/trixie/main/installer-amd64/current/images/netboot/debian-installer/amd64"
@@ -141,18 +169,21 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 			"kernel --name linux %s/linux auto=true priority=critical ip=dhcp url=%s %s --- ||\n",
 			mirror, preseedURL, consoleArgs)
 		w("echo pxe-beacon: KERNEL FETCH FAILED — client cannot reach deb.debian.org over HTTP")
-		w("sleep 5")
-		w("shell")
+		w("sleep 15")
+		w("echo pxe-beacon: rebooting (use iPXE Ctrl+B during banner to break in for debug)")
+		w("reboot")
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching initrd: %s/initrd.gz\n", mirror)
 		fmt.Fprintf(buf, "initrd --name initrd.gz %s/initrd.gz ||\n", mirror)
 		w("echo pxe-beacon: INITRD FETCH FAILED")
-		w("sleep 5")
-		w("shell")
+		w("sleep 15")
+		w("echo pxe-beacon: rebooting (use iPXE Ctrl+B during banner to break in for debug)")
+		w("reboot")
 		w("echo pxe-beacon: handing control to d-i (boot)...")
 		fmt.Fprintf(buf, "boot ||\n")
 		w("echo pxe-beacon: BOOT FAILED")
-		w("sleep 5")
-		w("shell")
+		w("sleep 15")
+		w("echo pxe-beacon: rebooting (use iPXE Ctrl+B during banner to break in for debug)")
+		w("reboot")
 
 	case "ubuntu-22.04", "ubuntu-24.04":
 		assets := assetsBase(m.Profile.Boot)
