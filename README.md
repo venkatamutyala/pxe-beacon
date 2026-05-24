@@ -226,6 +226,37 @@ curl http://127.0.0.1:8080/autoinstall/58-47-ca-70-c7-c9/user-data
 **Live config reload:** edit `fleet.yaml`, then `kill -HUP $(pgrep -x pxe-beacon)`.
 No restart needed — the next OFFER picks up the new config.
 
+### Arming an install (v0.7.0+)
+
+Machines in `fleet.yaml` are **disarmed by default** — pxe-beacon
+ignores their PXE DHCP requests and the box falls through to its
+local-disk boot. To install (or re-install), arm the machine first:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/machines/58:47:ca:70:c7:c9/arm
+# {"mac":"58:47:ca:70:c7:c9","name":"venkat-1","boot":"debian-12",
+#  "armed":true,"armed_at":"...","expires_at":"...","state":""}
+```
+
+The arming auto-expires after `-arm-ttl` (default `15m`) and is
+auto-cleared when cloud-init phones home on first boot. Restart of
+pxe-beacon also clears all armings. The `/admin` UI has per-row
+Arm/Disarm buttons that hit the same endpoints.
+
+The full REST surface (loopback-only, no auth — same security model
+as `/admin`):
+
+| method | path | what |
+|---|---|---|
+| `POST` | `/api/v1/machines/{mac}/arm` | open the install window |
+| `POST` | `/api/v1/machines/{mac}/disarm` | close the install window |
+| `GET`  | `/api/v1/machines/{mac}` | per-machine arm + state |
+| `GET`  | `/api/v1/machines` | all fleet machines with arm state |
+
+Unknown MACs (not in `fleet.yaml`) cannot be armed and keep their
+netboot.xyz fallback — so booting a random box doesn't require any
+prior arming.
+
 **Cloud-init phone_home:** the example user-data files include a
 `phone_home` block that tells cloud-init to POST to pxe-beacon when
 the install finishes. That transition flips the machine to
@@ -254,6 +285,7 @@ minutes get a ⚠ stalled flag. JSON version at `/status.json`.
 | `-crosscert`     | off                                           | emit `set crosscert` (older iPXE + HTTPS chain target) |
 | `-hint-after`    | `10s`                                         | fire the "client never fetched" hint after this        |
 | `-data-dir`      | `~/.local/share/pxe-beacon`                   | dir holding `pxe-beacon fetch` output, served at `/assets/` |
+| `-arm-ttl`       | `15m`                                         | how long an armed machine stays armed before auto-expiry (`0` = no expiry) |
 | `-loglevel`      | `info`                                        | `error`, `warn`, `info`, `debug`                       |
 
 `./pxe-beacon -help` for the full list. See [`RUN.md`](./RUN.md) for

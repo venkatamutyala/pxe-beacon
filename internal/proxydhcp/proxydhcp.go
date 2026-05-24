@@ -40,6 +40,13 @@ type Config struct {
 	// autoexec.ipxe HTTP route. Fleet here is for logging + future
 	// non-netboot.xyz iPXE builds that DO honor the OFFER bootfile.
 	Fleet *fleet.Fleet
+	// Armed, when non-nil, is consulted for every fleet-known MAC.
+	// If it returns false, BuildOffer skips OFFER (SkipDisarmed) and
+	// the client's PXE firmware falls through to its next boot device
+	// — usually local disk. Unknown MACs (no fleet entry) bypass this
+	// check entirely; they keep the netboot.xyz fallback behavior so
+	// "I just want to PXE-boot a random box" still works. v0.7.0+.
+	Armed func(mac string) bool
 }
 
 // defaultUserClass returns the configured iPXE user class, defaulting
@@ -69,6 +76,10 @@ const (
 	SkipNotPXE
 	SkipUnsupportedMessageType
 	SkipMissingArch
+	// SkipDisarmed indicates a known fleet member that hasn't been
+	// armed via POST /api/v1/machines/{mac}/arm. The client falls
+	// through to local-disk boot. v0.7.0+.
+	SkipDisarmed
 )
 
 // Decision describes everything BuildOffer concluded about a request.
@@ -134,10 +145,23 @@ func BuildOffer(req *dhcpv4.DHCPv4, cfg Config) (*dhcpv4.DHCPv4, Decision, error
 
 	// Resolve the per-MAC fleet profile. Cheap; safe for nil Fleet.
 	d.BootTarget = "menu"
+	machineKnown := false
 	if cfg.Fleet != nil {
 		p := cfg.Fleet.Lookup(d.ClientMAC)
 		d.MachineName = p.Name
 		d.BootTarget = p.Boot
+		machineKnown = p.Name != ""
+	}
+
+	// v0.7.0: arming check. Fleet members must be explicitly armed
+	// (POST /api/v1/machines/{mac}/arm) to receive an OFFER. Unknown
+	// MACs bypass this — they get the netboot.xyz fallback as before.
+	if machineKnown && cfg.Armed != nil && !cfg.Armed(d.ClientMAC) {
+		d.Stage = StageSkip
+		d.Skip = SkipDisarmed
+		d.SkipReason = fmt.Sprintf("%s (%s) is disarmed — POST /api/v1/machines/%s/arm to enable",
+			d.MachineName, d.ClientMAC, d.ClientMAC)
+		return nil, d, ErrSkip
 	}
 
 	// We respond to DISCOVER (initial broadcast on 67) and REQUEST

@@ -432,6 +432,90 @@ func TestBuildOffer_NilFleet_NoCrashAndDefaultsToMenu(t *testing.T) {
 	}
 }
 
+// v0.7.0 arming tests.
+
+func TestBuildOffer_Disarmed_SkipsOffer(t *testing.T) {
+	// Known fleet MAC, but Armed callback returns false → no OFFER.
+	req := newDiscover(t, "58:47:ca:70:c7:c9", iana.EFI_X86_64, "PXEClient", "")
+	cfg := defaultCfg()
+	cfg.Fleet = fleetCfg(t)
+	cfg.Armed = func(mac string) bool { return false }
+
+	reply, dec, err := BuildOffer(req, cfg)
+	if !errors.Is(err, ErrSkip) {
+		t.Fatalf("expected ErrSkip, got err=%v", err)
+	}
+	if reply != nil {
+		t.Errorf("disarmed MAC should not produce a reply, got %+v", reply)
+	}
+	if dec.Skip != SkipDisarmed {
+		t.Errorf("Decision.Skip = %v, want SkipDisarmed", dec.Skip)
+	}
+	if dec.Stage != StageSkip {
+		t.Errorf("Decision.Stage = %q, want %q", dec.Stage, StageSkip)
+	}
+	if !strings.Contains(dec.SkipReason, "disarmed") {
+		t.Errorf("SkipReason should mention 'disarmed', got %q", dec.SkipReason)
+	}
+}
+
+func TestBuildOffer_Armed_ProducesOffer(t *testing.T) {
+	req := newDiscover(t, "58:47:ca:70:c7:c9", iana.EFI_X86_64, "PXEClient", "")
+	cfg := defaultCfg()
+	cfg.Fleet = fleetCfg(t)
+	cfg.Armed = func(mac string) bool { return true }
+
+	reply, dec, err := BuildOffer(req, cfg)
+	if err != nil {
+		t.Fatalf("BuildOffer: %v", err)
+	}
+	if reply == nil {
+		t.Fatal("armed MAC should produce a reply")
+	}
+	if dec.Skip != NotSkipped {
+		t.Errorf("Decision.Skip = %v, want NotSkipped", dec.Skip)
+	}
+}
+
+func TestBuildOffer_UnknownMAC_BypassesArmCheck(t *testing.T) {
+	// Unknown MACs are not subject to arming — they should still
+	// reach the OFFER path even when Armed returns false. (This
+	// preserves the netboot.xyz fallback for random unconfigured boxes.)
+	req := newDiscover(t, "11:22:33:44:55:66", iana.EFI_X86_64, "PXEClient", "")
+	cfg := defaultCfg()
+	cfg.Fleet = fleetCfg(t)
+	// Armed always says false; should not affect unknown MAC.
+	cfg.Armed = func(mac string) bool { return false }
+
+	reply, dec, err := BuildOffer(req, cfg)
+	if err != nil {
+		t.Fatalf("BuildOffer: %v", err)
+	}
+	if reply == nil {
+		t.Fatal("unknown MAC should still get a reply (fallback path)")
+	}
+	if dec.Skip != NotSkipped {
+		t.Errorf("Decision.Skip = %v, want NotSkipped for unknown MAC", dec.Skip)
+	}
+}
+
+func TestBuildOffer_NilArmedCallback_AllowsAll(t *testing.T) {
+	// Backwards compatibility: when ArmState isn't wired (nil callback),
+	// behavior matches <= v0.6.x — all fleet members get OFFERs.
+	req := newDiscover(t, "58:47:ca:70:c7:c9", iana.EFI_X86_64, "PXEClient", "")
+	cfg := defaultCfg()
+	cfg.Fleet = fleetCfg(t)
+	cfg.Armed = nil
+
+	reply, _, err := BuildOffer(req, cfg)
+	if err != nil {
+		t.Fatalf("BuildOffer: %v", err)
+	}
+	if reply == nil {
+		t.Fatal("nil Armed callback: should get a reply (compat path)")
+	}
+}
+
 func TestBuildOffer_RejectsBadConfig(t *testing.T) {
 	req := newDiscover(t, "00:00:00:00:00:03", iana.EFI_X86_64, "PXEClient", "")
 	// missing AdvertisedIP

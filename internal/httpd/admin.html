@@ -36,6 +36,11 @@
   .tmpl-row { margin: .5rem 0; padding: .5rem .75rem; background: #161b22; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; }
   .tmpl-row .name { color: #79c0ff; }
   .tmpl-row .badge { color: #d29922; font-size: .8rem; padding: .1rem .4rem; background: #3d3014; border-radius: 3px; }
+  .arm-state { font-size: .8rem; padding: .15rem .5rem; border-radius: 3px; display: inline-block; }
+  .arm-state.disarmed { color: #8b949e; background: #161b22; border: 1px solid #30363d; }
+  .arm-state.armed { color: #2da44e; background: #1a3d1a; border: 1px solid #2da44e; }
+  button.arm { background: #1f6feb; border-color: #1f6feb; color: white; }
+  button.disarm { background: #6e2424; border-color: #6e2424; color: white; }
 </style>
 </head>
 <body>
@@ -54,16 +59,25 @@
 {{if .Flash}}<div class="flash-{{.FlashKind}}">{{.Flash}}</div>{{end}}
 
 <h2>fleet machines</h2>
+<p class="mac">
+  Machines are <strong>disarmed</strong> by default — pxe-beacon ignores their PXE DHCP requests and they fall through to local-disk boot. Click <strong>Arm</strong> to enable install on next power-on (auto-expires in {{.ArmTTL}}). Cloud-init phone-home auto-disarms.
+  <br>API: <code>POST /api/v1/machines/&lt;mac&gt;/arm</code> · <code>POST /api/v1/machines/&lt;mac&gt;/disarm</code> · <code>GET /api/v1/machines</code>
+</p>
 <table>
   <thead>
-    <tr><th>name</th><th>mac</th><th>boot</th><th>preseed</th><th>cloud_init</th><th>ipxe_script</th><th></th></tr>
+    <tr><th>name</th><th>mac</th><th>boot</th><th>arm</th><th>preseed</th><th>cloud_init</th><th>ipxe_script</th><th></th></tr>
   </thead>
   <tbody>
   {{range .Machines}}
-    <tr>
+    <tr data-mac="{{.MAC}}">
       <td>{{.Profile.Name}}</td>
       <td class="mac">{{.MAC}}</td>
       <td>{{.Profile.Boot}}</td>
+      <td class="arm-cell">
+        <span class="arm-state disarmed">disarmed</span>
+        <button type="button" class="arm" data-action="arm">arm</button>
+        <button type="button" class="disarm" data-action="disarm" style="display:none">disarm</button>
+      </td>
       <td>{{if .Profile.Preseed}}{{.Profile.Preseed}}{{else}}<span class="mac">(default)</span>{{end}}</td>
       <td>{{if .Profile.CloudInit}}{{.Profile.CloudInit}}{{else}}<span class="mac">(default)</span>{{end}}</td>
       <td>{{if .Profile.IPXEScript}}{{.Profile.IPXEScript}}{{else}}—{{end}}</td>
@@ -76,10 +90,73 @@
       </td>
     </tr>
   {{else}}
-    <tr><td colspan="7" class="mac">no machines configured — add one below</td></tr>
+    <tr><td colspan="8" class="mac">no machines configured — add one below</td></tr>
   {{end}}
   </tbody>
 </table>
+<script>
+function renderArm(row, view) {
+  const cell = row.querySelector('.arm-cell');
+  const state = cell.querySelector('.arm-state');
+  const armBtn = cell.querySelector('button.arm');
+  const disarmBtn = cell.querySelector('button.disarm');
+  if (view && view.armed) {
+    let label = 'armed';
+    if (view.expires_at) {
+      const ms = new Date(view.expires_at) - new Date();
+      if (ms > 0) {
+        const m = Math.floor(ms / 60000);
+        const s = Math.floor((ms % 60000) / 1000);
+        label = 'armed · ' + m + 'm' + (s < 10 ? '0' : '') + s + 's left';
+      } else {
+        label = 'armed (expired)';
+      }
+    }
+    state.textContent = label;
+    state.className = 'arm-state armed';
+    armBtn.style.display = 'none';
+    disarmBtn.style.display = '';
+  } else {
+    state.textContent = 'disarmed';
+    state.className = 'arm-state disarmed';
+    armBtn.style.display = '';
+    disarmBtn.style.display = 'none';
+  }
+}
+async function refreshArmRows() {
+  try {
+    const res = await fetch('/api/v1/machines');
+    if (!res.ok) return;
+    const data = await res.json();
+    const byMAC = {};
+    for (const m of (data.machines || [])) byMAC[m.mac] = m;
+    document.querySelectorAll('tr[data-mac]').forEach(row => {
+      renderArm(row, byMAC[row.dataset.mac]);
+    });
+  } catch (_) {}
+}
+document.querySelectorAll('tr[data-mac] button[data-action]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const row = btn.closest('tr[data-mac]');
+    const mac = row.dataset.mac;
+    const action = btn.dataset.action;
+    btn.disabled = true;
+    try {
+      const res = await fetch('/api/v1/machines/' + encodeURIComponent(mac) + '/' + action, {method: 'POST'});
+      if (res.ok) {
+        renderArm(row, await res.json());
+      } else {
+        const err = await res.json().catch(() => ({error: res.statusText}));
+        alert(action + ' failed: ' + (err.error || res.statusText));
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  });
+});
+refreshArmRows();
+setInterval(refreshArmRows, 5000);
+</script>
 
 <h2>add or update a machine</h2>
 <form class="machine" method="POST" action="/admin/fleet">

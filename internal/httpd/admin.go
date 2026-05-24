@@ -106,6 +106,11 @@ func (s *Server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 		CSRF         string
 		Flash        string
 		FlashKind    string
+		ArmTTL       string
+	}
+	armTTL := "no expiry"
+	if s.opts.ArmState != nil && s.opts.ArmState.TTL() > 0 {
+		armTTL = s.opts.ArmState.TTL().String()
 	}
 	vm := viewModel{
 		AdvertisedIP: s.opts.AdvertisedIP,
@@ -116,6 +121,7 @@ func (s *Server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 		CSRF:         s.admin.csrf,
 		Flash:        r.URL.Query().Get("flash"),
 		FlashKind:    r.URL.Query().Get("kind"),
+		ArmTTL:       armTTL,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.admin.indexTmpl.Execute(w, vm); err != nil {
