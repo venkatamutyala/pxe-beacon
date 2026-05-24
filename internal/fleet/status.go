@@ -38,12 +38,14 @@ type Status struct {
 	Stalled  bool      `json:"stalled,omitempty"`
 	Events   []Event   `json:"events,omitempty"`
 
-	// Arming fields (v0.7.0+). Populated by the httpd snapshot
-	// handler from armstate; fleet itself does not import armstate
-	// to avoid a dependency cycle.
-	Armed     bool      `json:"armed,omitempty"`
-	ArmedAt   time.Time `json:"armed_at,omitempty"`
-	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	// Pending-action fields (v0.7.1+). Populated by the httpd snapshot
+	// handler from the pending package; fleet itself does not import
+	// pending to avoid a dependency cycle.
+	//
+	// PendingAction is "deploy" / "rescue" / "" (none).
+	PendingAction string    `json:"pending_action,omitempty"`
+	RequestedAt   time.Time `json:"requested_at,omitempty"`
+	ExpiresAt     time.Time `json:"expires_at,omitempty"`
 }
 
 // Tracker is the in-memory store of per-MAC live status. Safe for

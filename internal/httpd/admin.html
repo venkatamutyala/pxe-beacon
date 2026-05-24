@@ -36,11 +36,14 @@
   .tmpl-row { margin: .5rem 0; padding: .5rem .75rem; background: #161b22; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; }
   .tmpl-row .name { color: #79c0ff; }
   .tmpl-row .badge { color: #d29922; font-size: .8rem; padding: .1rem .4rem; background: #3d3014; border-radius: 3px; }
-  .arm-state { font-size: .8rem; padding: .15rem .5rem; border-radius: 3px; display: inline-block; }
-  .arm-state.disarmed { color: #8b949e; background: #161b22; border: 1px solid #30363d; }
-  .arm-state.armed { color: #2da44e; background: #1a3d1a; border: 1px solid #2da44e; }
-  button.arm { background: #1f6feb; border-color: #1f6feb; color: white; }
-  button.disarm { background: #6e2424; border-color: #6e2424; color: white; }
+  .pending-state { font-size: .8rem; padding: .15rem .5rem; border-radius: 3px; display: inline-block; }
+  .pending-state.idle { color: #8b949e; background: #161b22; border: 1px solid #30363d; }
+  .pending-state.deploy { color: #2da44e; background: #1a3d1a; border: 1px solid #2da44e; }
+  .pending-state.rescue { color: #d29922; background: #3d3014; border: 1px solid #d29922; }
+  button.deploy { background: #1f6feb; border-color: #1f6feb; color: white; }
+  button.rescue { background: #6e5a14; border-color: #d29922; color: #f0d27a; }
+  button.cancel { background: #6e2424; border-color: #6e2424; color: white; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -60,12 +63,12 @@
 
 <h2>fleet machines</h2>
 <p class="mac">
-  Machines are <strong>disarmed</strong> by default — pxe-beacon ignores their PXE DHCP requests and they fall through to local-disk boot. Click <strong>Arm</strong> to enable install on next power-on (auto-expires in {{.ArmTTL}}). Cloud-init phone-home auto-disarms.
-  <br>API: <code>POST /api/v1/machines/&lt;mac&gt;/arm</code> · <code>POST /api/v1/machines/&lt;mac&gt;/disarm</code> · <code>GET /api/v1/machines</code>
+  Machines are <strong>idle</strong> by default — pxe-beacon ignores their PXE DHCP requests and they fall through to local-disk boot. Click <strong>Deploy</strong> to queue an OS install on next power-on (auto-expires in {{.PendingTTL}}). Cloud-init phone-home auto-cancels. <em>Rescue</em> mode is reserved for a future release.
+  <br>API: <code>POST /api/v1/machines/&lt;mac&gt;/deploy</code> · <code>POST /api/v1/machines/&lt;mac&gt;/rescue</code> · <code>POST /api/v1/machines/&lt;mac&gt;/cancel</code> · <code>GET /api/v1/machines</code>
 </p>
 <table>
   <thead>
-    <tr><th>name</th><th>mac</th><th>boot</th><th>arm</th><th>preseed</th><th>cloud_init</th><th>ipxe_script</th><th></th></tr>
+    <tr><th>name</th><th>mac</th><th>boot</th><th>pending</th><th>preseed</th><th>cloud_init</th><th>ipxe_script</th><th></th></tr>
   </thead>
   <tbody>
   {{range .Machines}}
@@ -73,10 +76,11 @@
       <td>{{.Profile.Name}}</td>
       <td class="mac">{{.MAC}}</td>
       <td>{{.Profile.Boot}}</td>
-      <td class="arm-cell">
-        <span class="arm-state disarmed">disarmed</span>
-        <button type="button" class="arm" data-action="arm">arm</button>
-        <button type="button" class="disarm" data-action="disarm" style="display:none">disarm</button>
+      <td class="pending-cell">
+        <span class="pending-state idle">idle</span>
+        <button type="button" class="deploy" data-action="deploy">deploy</button>
+        <button type="button" class="rescue" data-action="rescue" title="reserved for a future release">rescue</button>
+        <button type="button" class="cancel" data-action="cancel" style="display:none">cancel</button>
       </td>
       <td>{{if .Profile.Preseed}}{{.Profile.Preseed}}{{else}}<span class="mac">(default)</span>{{end}}</td>
       <td>{{if .Profile.CloudInit}}{{.Profile.CloudInit}}{{else}}<span class="mac">(default)</span>{{end}}</td>
@@ -95,35 +99,39 @@
   </tbody>
 </table>
 <script>
-function renderArm(row, view) {
-  const cell = row.querySelector('.arm-cell');
-  const state = cell.querySelector('.arm-state');
-  const armBtn = cell.querySelector('button.arm');
-  const disarmBtn = cell.querySelector('button.disarm');
-  if (view && view.armed) {
-    let label = 'armed';
+function renderPending(row, view) {
+  const cell = row.querySelector('.pending-cell');
+  const state = cell.querySelector('.pending-state');
+  const deployBtn = cell.querySelector('button.deploy');
+  const rescueBtn = cell.querySelector('button.rescue');
+  const cancelBtn = cell.querySelector('button.cancel');
+  const action = view && view.pending_action;
+  if (action) {
+    let label = action;
     if (view.expires_at) {
       const ms = new Date(view.expires_at) - new Date();
       if (ms > 0) {
         const m = Math.floor(ms / 60000);
         const s = Math.floor((ms % 60000) / 1000);
-        label = 'armed · ' + m + 'm' + (s < 10 ? '0' : '') + s + 's left';
+        label = action + ' · ' + m + 'm' + (s < 10 ? '0' : '') + s + 's left';
       } else {
-        label = 'armed (expired)';
+        label = action + ' (expired)';
       }
     }
     state.textContent = label;
-    state.className = 'arm-state armed';
-    armBtn.style.display = 'none';
-    disarmBtn.style.display = '';
+    state.className = 'pending-state ' + action;
+    deployBtn.style.display = 'none';
+    rescueBtn.style.display = 'none';
+    cancelBtn.style.display = '';
   } else {
-    state.textContent = 'disarmed';
-    state.className = 'arm-state disarmed';
-    armBtn.style.display = '';
-    disarmBtn.style.display = 'none';
+    state.textContent = 'idle';
+    state.className = 'pending-state idle';
+    deployBtn.style.display = '';
+    rescueBtn.style.display = '';
+    cancelBtn.style.display = 'none';
   }
 }
-async function refreshArmRows() {
+async function refreshPendingRows() {
   try {
     const res = await fetch('/api/v1/machines');
     if (!res.ok) return;
@@ -131,7 +139,7 @@ async function refreshArmRows() {
     const byMAC = {};
     for (const m of (data.machines || [])) byMAC[m.mac] = m;
     document.querySelectorAll('tr[data-mac]').forEach(row => {
-      renderArm(row, byMAC[row.dataset.mac]);
+      renderPending(row, byMAC[row.dataset.mac]);
     });
   } catch (_) {}
 }
@@ -144,7 +152,7 @@ document.querySelectorAll('tr[data-mac] button[data-action]').forEach(btn => {
     try {
       const res = await fetch('/api/v1/machines/' + encodeURIComponent(mac) + '/' + action, {method: 'POST'});
       if (res.ok) {
-        renderArm(row, await res.json());
+        renderPending(row, await res.json());
       } else {
         const err = await res.json().catch(() => ({error: res.statusText}));
         alert(action + ' failed: ' + (err.error || res.statusText));
@@ -154,8 +162,8 @@ document.querySelectorAll('tr[data-mac] button[data-action]').forEach(btn => {
     }
   });
 });
-refreshArmRows();
-setInterval(refreshArmRows, 5000);
+refreshPendingRows();
+setInterval(refreshPendingRows, 5000);
 </script>
 
 <h2>add or update a machine</h2>

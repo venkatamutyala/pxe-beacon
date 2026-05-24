@@ -22,12 +22,12 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/venkatamutyala/pxe-beacon/internal/armstate"
 	"github.com/venkatamutyala/pxe-beacon/internal/assets"
 	"github.com/venkatamutyala/pxe-beacon/internal/boot"
 	"github.com/venkatamutyala/pxe-beacon/internal/cache"
 	"github.com/venkatamutyala/pxe-beacon/internal/fleet"
 	"github.com/venkatamutyala/pxe-beacon/internal/narrlog"
+	"github.com/venkatamutyala/pxe-beacon/internal/pending"
 )
 
 //go:embed status.html
@@ -81,12 +81,14 @@ type Options struct {
 	// the wider network — without that, cloud-init phone_home back
 	// to pxe-beacon fails after first reboot. v0.6.0+.
 	ClientNetmask string
-	// ArmState owns per-machine arming. /api/v1/machines/*/arm and
-	// /disarm mutate it; proxyDHCP reads via callback. handleInstallerDone
-	// disarms on cloud-init phone_home. May be nil — when nil, the
-	// API routes 404 and proxyDHCP runs without an arm filter (every
-	// fleet member is effectively armed, matching <= v0.6.x). v0.7.0+.
-	ArmState *armstate.Store
+	// Pending owns per-machine pending actions (deploy/rescue/cancel).
+	// /api/v1/machines/{mac}/{deploy,rescue,cancel} mutate it;
+	// proxyDHCP reads via callback. handleInstallerDone cancels on
+	// cloud-init phone_home. May be nil — when nil, the API routes
+	// 404 and proxyDHCP runs without a pending filter (every fleet
+	// member is effectively pending-deploy, matching <= v0.6.x).
+	// v0.7.1+ (was ArmState in v0.7.0).
+	Pending *pending.Store
 }
 
 // Server is the pxe-beacon HTTP server.
@@ -208,10 +210,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /status.json", s.handleStatusJSON)
 	s.mux.HandleFunc("GET /assets/{target}/{file}", s.handleAsset)
 
-	// v0.7.0: REST API for one-shot arming. Loopback-only; no CSRF
+	// v0.7.1: REST API for queued boot actions. Loopback-only; no CSRF
 	// since the audience is curl/scripts (not browsers with cookies).
-	s.mux.Handle("POST /api/v1/machines/{mac}/arm", loopbackOnly(http.HandlerFunc(s.handleAPIArm)))
-	s.mux.Handle("POST /api/v1/machines/{mac}/disarm", loopbackOnly(http.HandlerFunc(s.handleAPIDisarm)))
+	// Renamed in v0.7.1 (was arm/disarm in v0.7.0; settled on
+	// deploy/rescue/cancel per MaaS naming convention).
+	s.mux.Handle("POST /api/v1/machines/{mac}/deploy", loopbackOnly(http.HandlerFunc(s.handleAPIDeploy)))
+	s.mux.Handle("POST /api/v1/machines/{mac}/rescue", loopbackOnly(http.HandlerFunc(s.handleAPIRescue)))
+	s.mux.Handle("POST /api/v1/machines/{mac}/cancel", loopbackOnly(http.HandlerFunc(s.handleAPICancel)))
 	s.mux.Handle("GET /api/v1/machines/{mac}", loopbackOnly(http.HandlerFunc(s.handleAPIMachine)))
 	s.mux.Handle("GET /api/v1/machines", loopbackOnly(http.HandlerFunc(s.handleAPIList)))
 
@@ -641,8 +646,8 @@ func (s *Server) handleMetaData(w http.ResponseWriter, r *http.Request) {
 
 // handleInstallerDone is the cloud-init phone_home callback. Once
 // hit, the machine transitions to "installer-done" in the status
-// tracker and (v0.7.0+) is disarmed so a subsequent reboot falls
-// through to local disk.
+// tracker and (v0.7.1+) the pending action is cancelled so a
+// subsequent reboot falls through to local disk.
 func (s *Server) handleInstallerDone(w http.ResponseWriter, r *http.Request) {
 	if !s.fleetReady(w) {
 		return
@@ -653,8 +658,8 @@ func (s *Server) handleInstallerDone(w http.ResponseWriter, r *http.Request) {
 	}
 	p := s.opts.Fleet.Lookup(mac)
 	s.opts.FleetStatus.Note(mac, fleet.EventInstallerDone)
-	if s.opts.ArmState != nil {
-		s.opts.ArmState.Disarm(mac)
+	if s.opts.Pending != nil {
+		s.opts.Pending.Cancel(mac)
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	body := "ok\n"
@@ -818,13 +823,15 @@ func (s *Server) handleStatusJSON(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snap := s.opts.FleetStatus.Snapshot()
-	// v0.7.0: enrich each row with the current arming state.
-	if s.opts.ArmState != nil {
+	// v0.7.1: enrich each row with the current pending action.
+	if s.opts.Pending != nil {
 		for i := range snap {
-			at, exp, armed := s.opts.ArmState.Status(snap[i].MAC)
-			snap[i].Armed = armed
-			snap[i].ArmedAt = at
-			snap[i].ExpiresAt = exp
+			action, at, exp, ok := s.opts.Pending.Status(snap[i].MAC)
+			if ok {
+				snap[i].PendingAction = string(action)
+				snap[i].RequestedAt = at
+				snap[i].ExpiresAt = exp
+			}
 		}
 	}
 	payload := map[string]any{
@@ -833,7 +840,7 @@ func (s *Server) handleStatusJSON(w http.ResponseWriter, r *http.Request) {
 			"http_port":     s.opts.HTTPPort,
 			"uptime_s":      int(time.Since(s.startedAt).Seconds()),
 			"started_at":    s.startedAt.UTC().Format(time.RFC3339),
-			"arm_ttl_s":     armTTLSeconds(s.opts.ArmState),
+			"pending_ttl_s": pendingTTLSeconds(s.opts.Pending),
 		},
 		"machines": snap,
 	}

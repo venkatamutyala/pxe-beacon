@@ -5,46 +5,51 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/venkatamutyala/pxe-beacon/internal/armstate"
 	"github.com/venkatamutyala/pxe-beacon/internal/fleet"
+	"github.com/venkatamutyala/pxe-beacon/internal/pending"
 )
 
 // machineAPIView is the JSON shape returned by every /api/v1/machines/*
-// endpoint. Combines fleet config + live tracker state + arming.
+// endpoint. Combines fleet config + live tracker state + pending action.
+//
+// v0.7.1 vocabulary (was {armed, armed_at} in v0.7.0):
+//   - pending_action: "deploy" | "rescue" | "" (none)
+//   - requested_at:   when the action was queued (omitted when none)
+//   - expires_at:     when the queued action will auto-cancel (omitted when none / no expiry)
+//   - state:          existing install-progress event from the Tracker
 type machineAPIView struct {
-	MAC       string    `json:"mac"`
-	Name      string    `json:"name,omitempty"`
-	Boot      string    `json:"boot,omitempty"`
-	Armed     bool      `json:"armed"`
-	ArmedAt   time.Time `json:"armed_at,omitempty"`
-	ExpiresAt time.Time `json:"expires_at,omitempty"`
-	State     string    `json:"state,omitempty"`
+	MAC           string    `json:"mac"`
+	Name          string    `json:"name,omitempty"`
+	Boot          string    `json:"boot,omitempty"`
+	PendingAction string    `json:"pending_action,omitempty"`
+	RequestedAt   time.Time `json:"requested_at,omitempty"`
+	ExpiresAt     time.Time `json:"expires_at,omitempty"`
+	State         string    `json:"state,omitempty"`
 }
 
 type apiErrorView struct {
 	Error string `json:"error"`
 }
 
-// apiReady asserts fleet + ArmState are wired. If not, writes a JSON
-// error and returns false.
+// apiReady asserts fleet + Pending are wired. Writes a JSON error and
+// returns false otherwise.
 func (s *Server) apiReady(w http.ResponseWriter) bool {
 	if s.opts.Fleet == nil || s.opts.FleetStatus == nil {
 		writeAPIError(w, http.StatusNotFound,
 			"fleet mode not enabled (start pxe-beacon with -config <fleet.yaml>)")
 		return false
 	}
-	if s.opts.ArmState == nil {
+	if s.opts.Pending == nil {
 		writeAPIError(w, http.StatusNotFound,
-			"arming disabled (ArmState not configured)")
+			"pending-action store not configured")
 		return false
 	}
 	return true
 }
 
-// apiExtractFleetMAC pulls and canonicalizes the {mac} path value, AND
-// verifies the MAC is a known fleet member. Returns canonical MAC +
-// Profile on success; writes a 400/404 JSON error and returns ""+zero
-// on failure.
+// apiExtractFleetMAC canonicalizes the {mac} path value AND verifies
+// the MAC is a known fleet member. Returns canonical MAC + Profile on
+// success; writes JSON error + ""+zero on failure.
 func (s *Server) apiExtractFleetMAC(w http.ResponseWriter, r *http.Request) (string, fleet.Profile) {
 	raw := r.PathValue("mac")
 	if raw == "" {
@@ -64,7 +69,8 @@ func (s *Server) apiExtractFleetMAC(w http.ResponseWriter, r *http.Request) (str
 	return canon, p
 }
 
-func (s *Server) handleAPIArm(w http.ResponseWriter, r *http.Request) {
+// handleAPIDeploy queues a deploy action.
+func (s *Server) handleAPIDeploy(w http.ResponseWriter, r *http.Request) {
 	if !s.apiReady(w) {
 		return
 	}
@@ -72,15 +78,29 @@ func (s *Server) handleAPIArm(w http.ResponseWriter, r *http.Request) {
 	if mac == "" {
 		return
 	}
-	if _, err := s.opts.ArmState.Arm(mac); err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "arm: "+err.Error())
+	if _, err := s.opts.Pending.Deploy(mac); err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "deploy: "+err.Error())
 		return
 	}
-	s.log.Infof("POST %s -> 200, armed %s (%s)", r.URL.Path, p.Name, mac)
+	s.log.Infof("POST %s -> 200, deploy queued for %s (%s)", r.URL.Path, p.Name, mac)
 	writeAPIView(w, s.buildView(mac, p))
 }
 
-func (s *Server) handleAPIDisarm(w http.ResponseWriter, r *http.Request) {
+// handleAPIRescue is a v0.7.1 stub. Returns 501 until the rescue
+// boot target is wired into the dispatch script.
+func (s *Server) handleAPIRescue(w http.ResponseWriter, r *http.Request) {
+	if !s.apiReady(w) {
+		return
+	}
+	if _, p := s.apiExtractFleetMAC(w, r); p.Name == "" {
+		return
+	}
+	writeAPIError(w, http.StatusNotImplemented,
+		"rescue boot target not yet implemented; tracked in TODO")
+}
+
+// handleAPICancel clears any pending action.
+func (s *Server) handleAPICancel(w http.ResponseWriter, r *http.Request) {
 	if !s.apiReady(w) {
 		return
 	}
@@ -88,8 +108,8 @@ func (s *Server) handleAPIDisarm(w http.ResponseWriter, r *http.Request) {
 	if mac == "" {
 		return
 	}
-	s.opts.ArmState.Disarm(mac)
-	s.log.Infof("POST %s -> 200, disarmed %s (%s)", r.URL.Path, p.Name, mac)
+	s.opts.Pending.Cancel(mac)
+	s.log.Infof("POST %s -> 200, cancelled pending action for %s (%s)", r.URL.Path, p.Name, mac)
 	writeAPIView(w, s.buildView(mac, p))
 }
 
@@ -117,8 +137,8 @@ func (s *Server) handleAPIList(w http.ResponseWriter, r *http.Request) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(map[string]any{
-		"arm_ttl_s": armTTLSeconds(s.opts.ArmState),
-		"machines":  out,
+		"pending_ttl_s": pendingTTLSeconds(s.opts.Pending),
+		"machines":      out,
 	}); err != nil {
 		s.log.Warnf("GET %s: encode error: %v", r.URL.Path, err)
 	}
@@ -130,11 +150,13 @@ func (s *Server) buildView(canon string, p fleet.Profile) machineAPIView {
 		Name: p.Name,
 		Boot: p.Boot,
 	}
-	if s.opts.ArmState != nil {
-		at, exp, armed := s.opts.ArmState.Status(canon)
-		view.Armed = armed
-		view.ArmedAt = at
-		view.ExpiresAt = exp
+	if s.opts.Pending != nil {
+		action, at, exp, ok := s.opts.Pending.Status(canon)
+		if ok {
+			view.PendingAction = string(action)
+			view.RequestedAt = at
+			view.ExpiresAt = exp
+		}
 	}
 	if s.opts.FleetStatus != nil {
 		for _, st := range s.opts.FleetStatus.Snapshot() {
@@ -160,12 +182,11 @@ func writeAPIError(w http.ResponseWriter, code int, msg string) {
 	_ = json.NewEncoder(w).Encode(apiErrorView{Error: msg})
 }
 
-// armTTLSeconds is a tiny helper for /status.json + GET /api/v1/machines.
-// Returns 0 when the store is nil or has no expiry configured.
-func armTTLSeconds(s *armstate.Store) int {
+// pendingTTLSeconds returns the store's TTL in seconds; 0 if nil or
+// no expiry configured.
+func pendingTTLSeconds(s *pending.Store) int {
 	if s == nil {
 		return 0
 	}
 	return int(s.TTL() / time.Second)
 }
-

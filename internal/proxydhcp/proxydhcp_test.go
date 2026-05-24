@@ -432,60 +432,57 @@ func TestBuildOffer_NilFleet_NoCrashAndDefaultsToMenu(t *testing.T) {
 	}
 }
 
-// v0.7.0 arming tests.
+// v0.7.1 pending-action tests.
 
-func TestBuildOffer_Disarmed_SkipsOffer(t *testing.T) {
-	// Known fleet MAC, but Armed callback returns false → no OFFER.
+func TestBuildOffer_NoPendingAction_SkipsOffer(t *testing.T) {
 	req := newDiscover(t, "58:47:ca:70:c7:c9", iana.EFI_X86_64, "PXEClient", "")
 	cfg := defaultCfg()
 	cfg.Fleet = fleetCfg(t)
-	cfg.Armed = func(mac string) bool { return false }
+	cfg.Pending = func(mac string) bool { return false }
 
 	reply, dec, err := BuildOffer(req, cfg)
 	if !errors.Is(err, ErrSkip) {
 		t.Fatalf("expected ErrSkip, got err=%v", err)
 	}
 	if reply != nil {
-		t.Errorf("disarmed MAC should not produce a reply, got %+v", reply)
+		t.Errorf("MAC with no pending action should not produce a reply, got %+v", reply)
 	}
-	if dec.Skip != SkipDisarmed {
-		t.Errorf("Decision.Skip = %v, want SkipDisarmed", dec.Skip)
+	if dec.Skip != SkipNoPendingAction {
+		t.Errorf("Decision.Skip = %v, want SkipNoPendingAction", dec.Skip)
 	}
 	if dec.Stage != StageSkip {
 		t.Errorf("Decision.Stage = %q, want %q", dec.Stage, StageSkip)
 	}
-	if !strings.Contains(dec.SkipReason, "disarmed") {
-		t.Errorf("SkipReason should mention 'disarmed', got %q", dec.SkipReason)
+	if !strings.Contains(dec.SkipReason, "no pending action") {
+		t.Errorf("SkipReason should mention 'no pending action', got %q", dec.SkipReason)
 	}
 }
 
-func TestBuildOffer_Armed_ProducesOffer(t *testing.T) {
+func TestBuildOffer_PendingAction_ProducesOffer(t *testing.T) {
 	req := newDiscover(t, "58:47:ca:70:c7:c9", iana.EFI_X86_64, "PXEClient", "")
 	cfg := defaultCfg()
 	cfg.Fleet = fleetCfg(t)
-	cfg.Armed = func(mac string) bool { return true }
+	cfg.Pending = func(mac string) bool { return true }
 
 	reply, dec, err := BuildOffer(req, cfg)
 	if err != nil {
 		t.Fatalf("BuildOffer: %v", err)
 	}
 	if reply == nil {
-		t.Fatal("armed MAC should produce a reply")
+		t.Fatal("MAC with pending action should produce a reply")
 	}
 	if dec.Skip != NotSkipped {
 		t.Errorf("Decision.Skip = %v, want NotSkipped", dec.Skip)
 	}
 }
 
-func TestBuildOffer_UnknownMAC_BypassesArmCheck(t *testing.T) {
-	// Unknown MACs are not subject to arming — they should still
-	// reach the OFFER path even when Armed returns false. (This
-	// preserves the netboot.xyz fallback for random unconfigured boxes.)
+func TestBuildOffer_UnknownMAC_BypassesPendingCheck(t *testing.T) {
+	// Unknown MACs aren't subject to the pending check — they should
+	// still reach the OFFER path even when Pending returns false.
 	req := newDiscover(t, "11:22:33:44:55:66", iana.EFI_X86_64, "PXEClient", "")
 	cfg := defaultCfg()
 	cfg.Fleet = fleetCfg(t)
-	// Armed always says false; should not affect unknown MAC.
-	cfg.Armed = func(mac string) bool { return false }
+	cfg.Pending = func(mac string) bool { return false }
 
 	reply, dec, err := BuildOffer(req, cfg)
 	if err != nil {
@@ -499,20 +496,20 @@ func TestBuildOffer_UnknownMAC_BypassesArmCheck(t *testing.T) {
 	}
 }
 
-func TestBuildOffer_NilArmedCallback_AllowsAll(t *testing.T) {
-	// Backwards compatibility: when ArmState isn't wired (nil callback),
+func TestBuildOffer_NilPendingCallback_AllowsAll(t *testing.T) {
+	// Backwards compatibility: when the pending Store isn't wired,
 	// behavior matches <= v0.6.x — all fleet members get OFFERs.
 	req := newDiscover(t, "58:47:ca:70:c7:c9", iana.EFI_X86_64, "PXEClient", "")
 	cfg := defaultCfg()
 	cfg.Fleet = fleetCfg(t)
-	cfg.Armed = nil
+	cfg.Pending = nil
 
 	reply, _, err := BuildOffer(req, cfg)
 	if err != nil {
 		t.Fatalf("BuildOffer: %v", err)
 	}
 	if reply == nil {
-		t.Fatal("nil Armed callback: should get a reply (compat path)")
+		t.Fatal("nil Pending callback: should get a reply (compat path)")
 	}
 }
 

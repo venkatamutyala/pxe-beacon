@@ -40,13 +40,14 @@ type Config struct {
 	// autoexec.ipxe HTTP route. Fleet here is for logging + future
 	// non-netboot.xyz iPXE builds that DO honor the OFFER bootfile.
 	Fleet *fleet.Fleet
-	// Armed, when non-nil, is consulted for every fleet-known MAC.
-	// If it returns false, BuildOffer skips OFFER (SkipDisarmed) and
-	// the client's PXE firmware falls through to its next boot device
-	// — usually local disk. Unknown MACs (no fleet entry) bypass this
-	// check entirely; they keep the netboot.xyz fallback behavior so
-	// "I just want to PXE-boot a random box" still works. v0.7.0+.
-	Armed func(mac string) bool
+	// Pending, when non-nil, is consulted for every fleet-known MAC.
+	// If it returns false (no pending action), BuildOffer skips OFFER
+	// (SkipNoPendingAction) and the client's PXE firmware falls
+	// through to its next boot device — usually local disk. Unknown
+	// MACs (no fleet entry) bypass this check entirely; they keep the
+	// netboot.xyz fallback behavior so "I just want to PXE-boot a
+	// random box" still works. v0.7.1+ (was Armed in v0.7.0).
+	Pending func(mac string) bool
 }
 
 // defaultUserClass returns the configured iPXE user class, defaulting
@@ -76,10 +77,10 @@ const (
 	SkipNotPXE
 	SkipUnsupportedMessageType
 	SkipMissingArch
-	// SkipDisarmed indicates a known fleet member that hasn't been
-	// armed via POST /api/v1/machines/{mac}/arm. The client falls
-	// through to local-disk boot. v0.7.0+.
-	SkipDisarmed
+	// SkipNoPendingAction indicates a known fleet member with no
+	// pending deploy/rescue action. The client falls through to
+	// local-disk boot. v0.7.1+ (was SkipDisarmed in v0.7.0).
+	SkipNoPendingAction
 )
 
 // Decision describes everything BuildOffer concluded about a request.
@@ -153,13 +154,14 @@ func BuildOffer(req *dhcpv4.DHCPv4, cfg Config) (*dhcpv4.DHCPv4, Decision, error
 		machineKnown = p.Name != ""
 	}
 
-	// v0.7.0: arming check. Fleet members must be explicitly armed
-	// (POST /api/v1/machines/{mac}/arm) to receive an OFFER. Unknown
-	// MACs bypass this — they get the netboot.xyz fallback as before.
-	if machineKnown && cfg.Armed != nil && !cfg.Armed(d.ClientMAC) {
+	// v0.7.1: pending-action check. Fleet members must have a
+	// pending action (POST /api/v1/machines/{mac}/deploy or /rescue)
+	// to receive an OFFER. Unknown MACs bypass this — they get the
+	// netboot.xyz fallback as before.
+	if machineKnown && cfg.Pending != nil && !cfg.Pending(d.ClientMAC) {
 		d.Stage = StageSkip
-		d.Skip = SkipDisarmed
-		d.SkipReason = fmt.Sprintf("%s (%s) is disarmed — POST /api/v1/machines/%s/arm to enable",
+		d.Skip = SkipNoPendingAction
+		d.SkipReason = fmt.Sprintf("%s (%s) has no pending action — POST /api/v1/machines/%s/deploy or /rescue to queue one",
 			d.MachineName, d.ClientMAC, d.ClientMAC)
 		return nil, d, ErrSkip
 	}

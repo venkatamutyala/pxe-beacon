@@ -15,13 +15,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/venkatamutyala/pxe-beacon/internal/armstate"
 	"github.com/venkatamutyala/pxe-beacon/internal/assets"
 	"github.com/venkatamutyala/pxe-beacon/internal/boot"
 	"github.com/venkatamutyala/pxe-beacon/internal/fleet"
 	"github.com/venkatamutyala/pxe-beacon/internal/httpd"
 	"github.com/venkatamutyala/pxe-beacon/internal/narrlog"
 	"github.com/venkatamutyala/pxe-beacon/internal/netinfo"
+	"github.com/venkatamutyala/pxe-beacon/internal/pending"
 	"github.com/venkatamutyala/pxe-beacon/internal/proxydhcp"
 	tftpd "github.com/venkatamutyala/pxe-beacon/internal/tftp"
 )
@@ -62,7 +62,7 @@ func main() {
 		flagDataDir       = flag.String("data-dir", defaultDataDir(), "directory holding extracted distro assets (populated by `pxe-beacon fetch`); also where template overrides under templates/ live; served at /assets/<target>/<file>")
 		flagLegacyRdir    = flag.Bool("legacy-redirector", false, "v0.4.x behavior: serve a TFTP redirector that chains iPXE to HTTP /autoinstall/<mac>/autoexec.ipxe. Default (v0.5.0+) serves a self-contained dispatch script. Use this flag to bisect if v0.5.0 breaks your boot.")
 		flagClientNetmask = flag.String("client-netmask", "", "if set, the dispatch script overrides iPXE's net0/netmask after dhcp (e.g. 255.255.0.0). Use when pxe-beacon and the PXE client are on different L3 subnets that share an L2 broadcast domain (typical when the Mac is on Wi-Fi and the PXE client is on wired LAN behind the same router). Widening the netmask makes iPXE treat the wider range as local and use ARP-based direct L2 routing instead of going through the gateway.")
-		flagArmTTL        = flag.Duration("arm-ttl", 15*time.Minute, "v0.7.0: how long an armed machine stays effectively armed. Arming is per-machine and opt-in via POST /api/v1/machines/{mac}/arm; default = disarmed. Cloud-init phone_home auto-disarms. 0 disables expiry (only manual disarm or successful install clears it).")
+		flagPendingTTL    = flag.Duration("pending-ttl", 15*time.Minute, "v0.7.1: how long a queued action (deploy / rescue) stays valid before auto-cancelling. Actions are queued per-machine via POST /api/v1/machines/{mac}/{deploy,rescue,cancel}; default = idle. Cloud-init phone_home auto-cancels. 0 disables expiry (only manual /cancel or successful install clears it).")
 		flagPrintVer      = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Usage = func() {
@@ -103,7 +103,7 @@ func main() {
 		advIP = ip.To4()
 	}
 
-	printBanner(log, version, picked, advIP, *flagListen, *flagHTTPPort, *flagTFTPListen, *flagChainURL, *flagIPXEScript, *flagConfig, *flagArmTTL, lvl)
+	printBanner(log, version, picked, advIP, *flagListen, *flagHTTPPort, *flagTFTPListen, *flagChainURL, *flagIPXEScript, *flagConfig, *flagPendingTTL, lvl)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -123,17 +123,18 @@ func main() {
 	}
 	statusTracker := fleet.NewTracker(fl, 5*time.Minute)
 
-	// v0.7.0: in-memory arming. Fresh start = all machines disarmed.
-	// Operator POSTs to /api/v1/machines/{mac}/arm to enable install
-	// for a specific machine; cloud-init phone_home auto-disarms.
-	armSt := armstate.New(*flagArmTTL)
+	// v0.7.1: in-memory pending-action store. Fresh start = all
+	// machines idle. Operator POSTs to /api/v1/machines/{mac}/deploy
+	// (or /rescue, when wired) to queue an action; cloud-init
+	// phone_home auto-cancels.
+	pendSt := pending.New(*flagPendingTTL)
 
 	cfg := proxydhcp.Config{
 		AdvertisedIP:   advIP,
 		HTTPPort:       *flagHTTPPort,
 		IPXEScriptPath: "/boot.ipxe",
 		Fleet:          fl,
-		Armed:          armSt.IsArmed,
+		Pending:        pendSt.IsPending,
 	}
 
 	lst, err := proxydhcp.New(proxydhcp.ServerOptions{
@@ -204,7 +205,7 @@ func main() {
 		TFTPAutoexec:   autoexecFn,
 		IPXEDispatch:   autoexecFn,
 		ClientNetmask:  *flagClientNetmask,
-		ArmState:       armSt,
+		Pending:        pendSt,
 	})
 	if err != nil {
 		log.Errorf("init http: %v", err)
@@ -266,7 +267,7 @@ func watchSIGHUP(ctx context.Context, fl *fleet.Fleet, log *narrlog.Logger) {
 }
 
 func printBanner(log *narrlog.Logger, ver string, picked *netinfo.Picked, advIP net.IP,
-	listen string, httpPort int, tftpListen, chainURL, scriptOverride, configPath string, armTTL time.Duration, lvl narrlog.Level) {
+	listen string, httpPort int, tftpListen, chainURL, scriptOverride, configPath string, pendingTTL time.Duration, lvl narrlog.Level) {
 
 	log.Infof("pxe-beacon %s (%s/%s)", ver, runtime.GOOS, runtime.GOARCH)
 	log.Infof("  interface     : %s", picked.Iface.Name)
@@ -278,10 +279,10 @@ func printBanner(log *narrlog.Logger, ver string, picked *netinfo.Picked, advIP 
 	if configPath != "" {
 		log.Infof("  fleet config  : %s (SIGHUP reloads)", configPath)
 		log.Infof("  status page   : http://%s:%d/status", advIP, httpPort)
-		if armTTL > 0 {
-			log.Infof("  arming        : per-MAC opt-in via POST /api/v1/machines/{mac}/arm (TTL %s)", armTTL)
+		if pendingTTL > 0 {
+			log.Infof("  queue actions : POST /api/v1/machines/{mac}/{deploy,rescue,cancel} (TTL %s)", pendingTTL)
 		} else {
-			log.Infof("  arming        : per-MAC opt-in via POST /api/v1/machines/{mac}/arm (no expiry)")
+			log.Infof("  queue actions : POST /api/v1/machines/{mac}/{deploy,rescue,cancel} (no expiry)")
 		}
 	} else {
 		log.Infof("  fleet config  : (none — single-machine mode; pass -config for fleet mode)")

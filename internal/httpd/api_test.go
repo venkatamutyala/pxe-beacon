@@ -10,14 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venkatamutyala/pxe-beacon/internal/armstate"
 	"github.com/venkatamutyala/pxe-beacon/internal/fleet"
 	"github.com/venkatamutyala/pxe-beacon/internal/narrlog"
+	"github.com/venkatamutyala/pxe-beacon/internal/pending"
 )
 
-// newAPIServer builds a Server with one fleet entry and a fresh
-// armstate.Store, returned alongside both so tests can inspect.
-func newAPIServer(t *testing.T) (*Server, *armstate.Store, *fleet.Fleet) {
+func newAPIServer(t *testing.T) (*Server, *pending.Store, *fleet.Fleet) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -36,7 +34,7 @@ machines:
 		t.Fatal(err)
 	}
 	tracker := fleet.NewTracker(fl, 5*time.Minute)
-	armSt := armstate.New(15 * time.Minute)
+	pSt := pending.New(15 * time.Minute)
 
 	srv, err := New(Options{
 		Listen:       "127.0.0.1:0",
@@ -45,16 +43,14 @@ machines:
 		Logger:       log,
 		Fleet:        fl,
 		FleetStatus:  tracker,
-		ArmState:     armSt,
+		Pending:      pSt,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return srv, armSt, fl
+	return srv, pSt, fl
 }
 
-// doLoopbackReq sets the RemoteAddr to loopback so loopbackOnly
-// middleware admits the request.
 func doLoopbackReq(srv *Server, method, target string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, target, nil)
 	req.RemoteAddr = "127.0.0.1:54321"
@@ -63,55 +59,71 @@ func doLoopbackReq(srv *Server, method, target string) *httptest.ResponseRecorde
 	return w
 }
 
-func TestAPI_ArmDisarmRoundTrip(t *testing.T) {
-	srv, armSt, _ := newAPIServer(t)
+func TestAPI_DeployCancelRoundTrip(t *testing.T) {
+	srv, pSt, _ := newAPIServer(t)
 	mac := "58:47:ca:70:c7:c9"
 
-	// Initially disarmed.
-	if armSt.IsArmed(mac) {
-		t.Fatal("fresh state: should be disarmed")
+	if pSt.IsPending(mac) {
+		t.Fatal("fresh state: should be idle")
 	}
 
-	// Arm via API.
-	w := doLoopbackReq(srv, "POST", "/api/v1/machines/"+mac+"/arm")
+	// Deploy via API.
+	w := doLoopbackReq(srv, "POST", "/api/v1/machines/"+mac+"/deploy")
 	if w.Code != 200 {
-		t.Fatalf("arm: status %d, body=%s", w.Code, w.Body.String())
+		t.Fatalf("deploy: status %d, body=%s", w.Code, w.Body.String())
 	}
 	var view machineAPIView
 	if err := json.Unmarshal(w.Body.Bytes(), &view); err != nil {
-		t.Fatalf("decode arm body: %v body=%s", err, w.Body.String())
+		t.Fatalf("decode deploy body: %v body=%s", err, w.Body.String())
 	}
-	if !view.Armed {
-		t.Fatalf("arm response should have armed=true, got %+v", view)
+	if view.PendingAction != "deploy" {
+		t.Fatalf("deploy response should have pending_action='deploy', got %+v", view)
 	}
 	if view.Name != "venkat-1" || view.Boot != "debian-12" {
-		t.Errorf("arm response missing fleet fields: %+v", view)
+		t.Errorf("deploy response missing fleet fields: %+v", view)
 	}
-	if !armSt.IsArmed(mac) {
-		t.Fatal("Store should be armed after API call")
+	if !pSt.IsPending(mac) {
+		t.Fatal("Store should be pending after API call")
 	}
 
-	// Disarm via API.
-	w = doLoopbackReq(srv, "POST", "/api/v1/machines/"+mac+"/disarm")
+	// Cancel via API. Use a fresh view because the omitempty tag on
+	// pending_action means the cancel response omits the field, and
+	// json.Unmarshal won't clear what's already there.
+	w = doLoopbackReq(srv, "POST", "/api/v1/machines/"+mac+"/cancel")
 	if w.Code != 200 {
-		t.Fatalf("disarm: status %d, body=%s", w.Code, w.Body.String())
+		t.Fatalf("cancel: status %d, body=%s", w.Code, w.Body.String())
 	}
+	view = machineAPIView{}
 	if err := json.Unmarshal(w.Body.Bytes(), &view); err != nil {
-		t.Fatalf("decode disarm body: %v", err)
+		t.Fatalf("decode cancel body: %v", err)
 	}
-	if view.Armed {
-		t.Fatalf("disarm response should have armed=false, got %+v", view)
+	if view.PendingAction != "" {
+		t.Fatalf("cancel response should have empty pending_action, got %+v", view)
 	}
-	if armSt.IsArmed(mac) {
-		t.Fatal("Store should be disarmed after API call")
+	if pSt.IsPending(mac) {
+		t.Fatal("Store should be idle after Cancel API call")
 	}
 }
 
-func TestAPI_ArmUnknownMAC_404(t *testing.T) {
+func TestAPI_Rescue_Returns501(t *testing.T) {
+	srv, pSt, _ := newAPIServer(t)
+	mac := "58:47:ca:70:c7:c9"
+
+	w := doLoopbackReq(srv, "POST", "/api/v1/machines/"+mac+"/rescue")
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("rescue: want 501, got %d body=%s", w.Code, w.Body.String())
+	}
+	// Rescue stub must NOT queue an action.
+	if pSt.IsPending(mac) {
+		t.Fatal("rescue 501 stub should NOT have queued an action")
+	}
+}
+
+func TestAPI_DeployUnknownMAC_404(t *testing.T) {
 	srv, _, _ := newAPIServer(t)
-	w := doLoopbackReq(srv, "POST", "/api/v1/machines/aa:bb:cc:dd:ee:ff/arm")
+	w := doLoopbackReq(srv, "POST", "/api/v1/machines/aa:bb:cc:dd:ee:ff/deploy")
 	if w.Code != 404 {
-		t.Fatalf("unknown MAC arm: want 404, got %d body=%s", w.Code, w.Body.String())
+		t.Fatalf("unknown MAC deploy: want 404, got %d body=%s", w.Code, w.Body.String())
 	}
 	var errView apiErrorView
 	if err := json.Unmarshal(w.Body.Bytes(), &errView); err != nil {
@@ -124,14 +136,14 @@ func TestAPI_ArmUnknownMAC_404(t *testing.T) {
 
 func TestAPI_BadMACFormat_400(t *testing.T) {
 	srv, _, _ := newAPIServer(t)
-	w := doLoopbackReq(srv, "POST", "/api/v1/machines/not-a-mac/arm")
+	w := doLoopbackReq(srv, "POST", "/api/v1/machines/not-a-mac/deploy")
 	if w.Code != 400 {
 		t.Fatalf("bad MAC: want 400, got %d", w.Code)
 	}
 }
 
 func TestAPI_GetMachine(t *testing.T) {
-	srv, armSt, _ := newAPIServer(t)
+	srv, pSt, _ := newAPIServer(t)
 	mac := "58:47:ca:70:c7:c9"
 
 	w := doLoopbackReq(srv, "GET", "/api/v1/machines/"+mac)
@@ -140,31 +152,32 @@ func TestAPI_GetMachine(t *testing.T) {
 	}
 	var view machineAPIView
 	_ = json.Unmarshal(w.Body.Bytes(), &view)
-	if view.Armed {
-		t.Errorf("disarmed GET should report armed=false, got %+v", view)
+	if view.PendingAction != "" {
+		t.Errorf("idle GET should report empty pending_action, got %+v", view)
 	}
 
-	if _, err := armSt.Arm(mac); err != nil {
+	if _, err := pSt.Deploy(mac); err != nil {
 		t.Fatal(err)
 	}
 	w = doLoopbackReq(srv, "GET", "/api/v1/machines/"+mac)
+	view = machineAPIView{}
 	_ = json.Unmarshal(w.Body.Bytes(), &view)
-	if !view.Armed {
-		t.Errorf("armed GET should report armed=true, got %+v", view)
+	if view.PendingAction != "deploy" {
+		t.Errorf("deploy-pending GET should report pending_action='deploy', got %+v", view)
 	}
 }
 
 func TestAPI_List(t *testing.T) {
-	srv, armSt, _ := newAPIServer(t)
-	_, _ = armSt.Arm("58:47:ca:70:c7:c9")
+	srv, pSt, _ := newAPIServer(t)
+	_, _ = pSt.Deploy("58:47:ca:70:c7:c9")
 
 	w := doLoopbackReq(srv, "GET", "/api/v1/machines")
 	if w.Code != 200 {
 		t.Fatalf("list: status %d", w.Code)
 	}
 	var resp struct {
-		ArmTTLs  int              `json:"arm_ttl_s"`
-		Machines []machineAPIView `json:"machines"`
+		PendingTTLs int              `json:"pending_ttl_s"`
+		Machines    []machineAPIView `json:"machines"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode list: %v body=%s", err, w.Body.String())
@@ -172,18 +185,17 @@ func TestAPI_List(t *testing.T) {
 	if len(resp.Machines) != 1 {
 		t.Fatalf("want 1 machine, got %d", len(resp.Machines))
 	}
-	if !resp.Machines[0].Armed {
-		t.Errorf("expected armed=true in list, got %+v", resp.Machines[0])
+	if resp.Machines[0].PendingAction != "deploy" {
+		t.Errorf("expected pending_action='deploy' in list, got %+v", resp.Machines[0])
 	}
-	if resp.ArmTTLs != int((15 * time.Minute).Seconds()) {
-		t.Errorf("arm_ttl_s wrong: got %d", resp.ArmTTLs)
+	if resp.PendingTTLs != int((15 * time.Minute).Seconds()) {
+		t.Errorf("pending_ttl_s wrong: got %d", resp.PendingTTLs)
 	}
 }
 
 func TestAPI_NonLoopback_403(t *testing.T) {
 	srv, _, _ := newAPIServer(t)
-	// Don't go through doLoopbackReq — set a non-loopback RemoteAddr.
-	req := httptest.NewRequest("POST", "/api/v1/machines/58:47:ca:70:c7:c9/arm", nil)
+	req := httptest.NewRequest("POST", "/api/v1/machines/58:47:ca:70:c7:c9/deploy", nil)
 	req.RemoteAddr = "10.69.7.55:54321"
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
@@ -192,16 +204,15 @@ func TestAPI_NonLoopback_403(t *testing.T) {
 	}
 }
 
-func TestAPI_InstallerDone_AutoDisarms(t *testing.T) {
-	srv, armSt, _ := newAPIServer(t)
+func TestAPI_InstallerDone_AutoCancels(t *testing.T) {
+	srv, pSt, _ := newAPIServer(t)
 	mac := "58:47:ca:70:c7:c9"
-	if _, err := armSt.Arm(mac); err != nil {
+	if _, err := pSt.Deploy(mac); err != nil {
 		t.Fatal(err)
 	}
-	if !armSt.IsArmed(mac) {
-		t.Fatal("precondition: should be armed")
+	if !pSt.IsPending(mac) {
+		t.Fatal("precondition: should be pending")
 	}
-	// cloud-init phone_home POSTs here.
 	req := httptest.NewRequest("POST", "/autoinstall/58-47-ca-70-c7-c9/done", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
 	w := httptest.NewRecorder()
@@ -209,7 +220,7 @@ func TestAPI_InstallerDone_AutoDisarms(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("done: status %d body=%s", w.Code, w.Body.String())
 	}
-	if armSt.IsArmed(mac) {
-		t.Fatal("phone_home should have disarmed the machine")
+	if pSt.IsPending(mac) {
+		t.Fatal("phone_home should have cancelled the pending action")
 	}
 }
