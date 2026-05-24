@@ -92,6 +92,12 @@ HYP=$(echo "$MAC" | tr ':' '-')
 note "curl /debug/tftp/autoexec.ipxe (v0.5.0+ dispatch script — same bytes TFTP serves)"
 run "curl -sS -m 5 http://${ADV_IP}:${PORT}/debug/tftp/autoexec.ipxe || echo '(unreachable — pxe-beacon < v0.5.1 lacks this route)'"
 
+note "curl /debug/iPXE-state (v0.5.4+ phone-home route — should appear in pxe-beacon log)"
+echo "  -> Watch pxe-beacon's stdout in another terminal. You should see a" >> "$OUT"
+echo "  -> line like: iPXE-state from 127.0.0.1:...: net0=\"58-47-ca-...\"" >> "$OUT"
+echo "  -> If you DO: route is wired correctly. If you DON'T: route is broken." >> "$OUT"
+run "curl -sS -m 5 -o /dev/null -w 'HTTP %{http_code} (%{size_download} bytes)\\n' 'http://${ADV_IP}:${PORT}/debug/iPXE-state?test=manual&net0=${HYP}&ip=test-ip&gateway=test-gw' || echo '(unreachable — pxe-beacon < v0.5.4 lacks this route)'"
+
 note "curl /autoinstall/<mac>/preseed.cfg (the d-i preseed)"
 run "curl -sS -m 5 http://${ADV_IP}:${PORT}/autoinstall/${HYP}/preseed.cfg 2>&1 | head -40 || true"
 
