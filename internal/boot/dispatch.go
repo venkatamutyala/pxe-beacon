@@ -65,7 +65,7 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("# directly. No HTTP chain dependency.")
 	w("")
 	w("echo ==============================================")
-	w("echo pxe-beacon dispatch (v0.6.2)")
+	w("echo pxe-beacon dispatch (v0.6.3)")
 	w("echo   net0/mac       = ${net0/mac}")
 	w("echo   net0/mac:hxhyp = ${net0/mac:hexhyp}")
 	w("echo ==============================================")
@@ -120,14 +120,22 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 		writeMachineBlock(&buf, m, ctx)
 	}
 
-	// Default arm — fall back to netboot.xyz embed.
-	w("# ----- default arm: machine not in fleet.yaml (or iseq did not match) -----")
+	// Default arm — fall back to netboot.xyz embed. Reached when iseq
+	// did NOT match any fleet entry — emits a "NO MATCH" notice so
+	// operators can debug typos in fleet.yaml.
+	w("# ----- default arm: machine not in fleet.yaml (iseq did not match) -----")
 	w(":target_default")
 	w("echo pxe-beacon: NO MATCH for ${net0/mac:hexhyp} in fleet.yaml")
-	w("echo pxe-beacon: if you EXPECTED a match, check that fleet.yaml's mac matches ${net0/mac:hexhyp} above")
+	w("echo pxe-beacon: check that fleet.yaml's mac matches ${net0/mac:hexhyp} above")
 	w("sleep 8")
+	w("goto menu_netbootxyz")
+	w("")
+	// menu_netbootxyz — clean chain to netboot.xyz menu without the
+	// "NO MATCH" preamble. Reached when an operator deliberately
+	// picks "netboot.xyz menu" from a matched-arm boot menu (v0.6.2+).
+	w(":menu_netbootxyz")
 	w("echo pxe-beacon: chaining https://boot.netboot.xyz/menu.ipxe ...")
-	w("chain --replace --autofree https://boot.netboot.xyz/menu.ipxe || goto target_default_fail_chain")
+	w("chain --replace --autofree https://boot.netboot.xyz/menu.ipxe || goto menu_netbootxyz_fail")
 	w("")
 	// Top-level fail labels — reached if the top-of-script dhcp itself
 	// failed. Each machine block goto's its own labeled fail blocks.
@@ -136,7 +144,7 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("sleep 30")
 	w("reboot")
 	w("")
-	w(":target_default_fail_chain")
+	w(":menu_netbootxyz_fail")
 	w("echo pxe-beacon: netboot.xyz CHAIN FAILED — check HTTPS reachability; rebooting in 30s")
 	w("sleep 30")
 	w("reboot")
@@ -186,24 +194,33 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	fmt.Fprintf(buf, ":%s\n", label)
 	fmt.Fprintf(buf, "echo pxe-beacon: %s (%s) -> %s\n", name, m.MAC, m.Profile.Boot)
 
-	// v0.6.2: 10-second interactive boot menu. Default = fleet target
+	// v0.6.3: 30-second interactive boot menu. Default = fleet target
 	// (auto-selected for unattended boots). Operator at the console
-	// can press a key to override:
-	//   1 — fleet target (default, this is the auto-selected option)
-	//   2 — netboot.xyz menu (pick a different OS interactively)
-	//   3 — iPXE shell (debug)
-	fmt.Fprintf(buf, "menu pxe-beacon: %s (%s)\n", name, m.MAC)
+	// can press a letter key to override:
+	//   b — fleet target (default — also auto-selected at timeout)
+	//   m — netboot.xyz menu (pick a different OS interactively)
+	//   s — iPXE shell (debug)
+	//
+	// Letter keys instead of numeric: some snponly UEFI keyboard
+	// stacks don't register number keys reliably. Letters are
+	// consistently handled.
+	//
+	// `goto menu_netbootxyz` (not `target_default`) — the latter emits
+	// "NO MATCH" text and sleeps 8s, which is the right UX for
+	// iseq-miss but wrong for menu-driven choice.
+	fmt.Fprintf(buf, "menu pxe-beacon — %s (%s)\n", name, m.MAC)
 	fmt.Fprintf(buf, "item --gap fleet config: boot=%s\n", m.Profile.Boot)
-	fmt.Fprintf(buf, "item --default --key 1 %s_boot   Boot fleet target (default: %s) — auto in 10s\n",
+	fmt.Fprintf(buf, "item --default --key b %s_boot         Boot fleet target (default — auto in 30s): %s\n",
 		label, m.Profile.Boot)
-	fmt.Fprintf(buf, "item --key 2 target_default                            netboot.xyz menu (manual OS picker)\n")
-	fmt.Fprintf(buf, "item --key 3 %s_shell                                  iPXE shell (debug)\n", label)
-	fmt.Fprintf(buf, "choose --timeout 10000 --default %s_boot %s_menu_choice ||\n", label, label)
+	fmt.Fprintf(buf, "item            --key m menu_netbootxyz   netboot.xyz menu (manual OS picker)\n")
+	fmt.Fprintf(buf, "item            --key s %s_shell       iPXE shell (debug)\n", label)
+	fmt.Fprintf(buf, "echo pxe-beacon: press 'b' to boot %s now, 'm' for netboot.xyz menu, 's' for shell — or wait 30s\n", m.Profile.Boot)
+	fmt.Fprintf(buf, "choose --timeout 30000 --default %s_boot %s_menu_choice ||\n", label, label)
 	fmt.Fprintf(buf, "goto %s_boot\n", label)
 	fmt.Fprintf(buf, "goto ${%s_menu_choice}\n", label)
 	w("")
 	fmt.Fprintf(buf, ":%s_shell\n", label)
-	w("echo pxe-beacon: dropping to iPXE shell. Type 'exit' to return to autoboot.")
+	w("echo pxe-beacon: dropping to iPXE shell. Type 'exit' to return to the menu.")
 	w("shell")
 	fmt.Fprintf(buf, "goto %s\n", label)
 	w("")

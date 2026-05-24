@@ -83,12 +83,18 @@ machines:
 		":m_venkat_1_fail_kernel",
 		"goto m_venkat_1_fail_boot",
 		":m_venkat_1_fail_boot",
-		// v0.6.2: interactive boot menu with 10s timeout. Default is
-		// the fleet target; alt options are netboot.xyz menu + shell.
-		"menu pxe-beacon: venkat-1",
-		"choose --timeout 10000 --default m_venkat_1_boot",
+		// v0.6.3: interactive boot menu with 30s timeout. Letter keys
+		// (b/m/s) instead of numeric (some snponly keyboards drop
+		// numeric input). 'm' jumps to :menu_netbootxyz (no "NO MATCH"
+		// preamble, unlike iseq-miss path).
+		"menu pxe-beacon — venkat-1",
+		"--default --key b m_venkat_1_boot",
+		"--key m menu_netbootxyz",
+		"--key s m_venkat_1_shell",
+		"choose --timeout 30000 --default m_venkat_1_boot",
 		":m_venkat_1_boot",
 		":m_venkat_1_shell",
+		":menu_netbootxyz",
 		// Default fallback arm still present.
 		":target_default",
 	} {
