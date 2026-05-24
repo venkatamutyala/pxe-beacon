@@ -47,20 +47,21 @@ func main() {
 	}
 
 	var (
-		flagIface      = flag.String("interface", "", "network interface to advertise (auto-detect if empty)")
-		flagListen     = flag.String("listen", "0.0.0.0", "address to bind UDP sockets on")
-		flagHTTPPort   = flag.Int("http-port", 8080, "HTTP port for serving iPXE binary and chain script")
-		flagLogLevel   = flag.String("loglevel", "info", "log level: error, warn, info, debug")
-		flagChainURL   = flag.String("chain-url", "https://boot.netboot.xyz/menu.ipxe", "URL the iPXE script chainloads")
-		flagIPXEScript = flag.String("ipxe-script", "", "path to a custom boot.ipxe template (overrides embedded default)")
-		flagAdvIP      = flag.String("advertise-ip", "", "override the advertised IPv4 (auto-detect if empty)")
-		flagTFTPListen = flag.String("tftp-listen", "0.0.0.0:69", "TFTP listen address (host:port)")
-		flagCrossCert  = flag.Bool("crosscert", false, "emit `set crosscert http://ca.ipxe.org/auto` in boot.ipxe (helps older iPXE builds with HTTPS netboot.xyz)")
-		flagHintAfter  = flag.Duration("hint-after", 10*time.Second, "log a 'client never fetched' hint this long after an OFFER if no follow-up arrives (0 disables)")
-		flagConfig     = flag.String("config", "", "path to fleet.yaml — enables per-MAC routing, autoinstall, and /status page (unset = v0.1.3 single-machine behavior)")
-		flagDataDir    = flag.String("data-dir", defaultDataDir(), "directory holding extracted distro assets (populated by `pxe-beacon fetch`); also where template overrides under templates/ live; served at /assets/<target>/<file>")
-		flagLegacyRdir = flag.Bool("legacy-redirector", false, "v0.4.x behavior: serve a TFTP redirector that chains iPXE to HTTP /autoinstall/<mac>/autoexec.ipxe. Default (v0.5.0+) serves a self-contained dispatch script. Use this flag to bisect if v0.5.0 breaks your boot.")
-		flagPrintVer   = flag.Bool("version", false, "print version and exit")
+		flagIface         = flag.String("interface", "", "network interface to advertise (auto-detect if empty)")
+		flagListen        = flag.String("listen", "0.0.0.0", "address to bind UDP sockets on")
+		flagHTTPPort      = flag.Int("http-port", 8080, "HTTP port for serving iPXE binary and chain script")
+		flagLogLevel      = flag.String("loglevel", "info", "log level: error, warn, info, debug")
+		flagChainURL      = flag.String("chain-url", "https://boot.netboot.xyz/menu.ipxe", "URL the iPXE script chainloads")
+		flagIPXEScript    = flag.String("ipxe-script", "", "path to a custom boot.ipxe template (overrides embedded default)")
+		flagAdvIP         = flag.String("advertise-ip", "", "override the advertised IPv4 (auto-detect if empty)")
+		flagTFTPListen    = flag.String("tftp-listen", "0.0.0.0:69", "TFTP listen address (host:port)")
+		flagCrossCert     = flag.Bool("crosscert", false, "emit `set crosscert http://ca.ipxe.org/auto` in boot.ipxe (helps older iPXE builds with HTTPS netboot.xyz)")
+		flagHintAfter     = flag.Duration("hint-after", 10*time.Second, "log a 'client never fetched' hint this long after an OFFER if no follow-up arrives (0 disables)")
+		flagConfig        = flag.String("config", "", "path to fleet.yaml — enables per-MAC routing, autoinstall, and /status page (unset = v0.1.3 single-machine behavior)")
+		flagDataDir       = flag.String("data-dir", defaultDataDir(), "directory holding extracted distro assets (populated by `pxe-beacon fetch`); also where template overrides under templates/ live; served at /assets/<target>/<file>")
+		flagLegacyRdir    = flag.Bool("legacy-redirector", false, "v0.4.x behavior: serve a TFTP redirector that chains iPXE to HTTP /autoinstall/<mac>/autoexec.ipxe. Default (v0.5.0+) serves a self-contained dispatch script. Use this flag to bisect if v0.5.0 breaks your boot.")
+		flagClientNetmask = flag.String("client-netmask", "", "if set, the dispatch script overrides iPXE's net0/netmask after dhcp (e.g. 255.255.0.0). Use when pxe-beacon and the PXE client are on different L3 subnets that share an L2 broadcast domain (typical when the Mac is on Wi-Fi and the PXE client is on wired LAN behind the same router). Widening the netmask makes iPXE treat the wider range as local and use ARP-based direct L2 routing instead of going through the gateway.")
+		flagPrintVer      = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(),
@@ -153,8 +154,9 @@ func main() {
 			}
 		} else {
 			dctx := boot.DispatchContext{
-				AdvertisedIP: advIP.String(),
-				HTTPPort:     *flagHTTPPort,
+				AdvertisedIP:  advIP.String(),
+				HTTPPort:      *flagHTTPPort,
+				ClientNetmask: *flagClientNetmask,
 			}
 			autoexecFn = func() []byte {
 				return boot.RenderDispatch(fl, dctx)

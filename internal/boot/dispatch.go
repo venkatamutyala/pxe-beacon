@@ -15,6 +15,14 @@ import (
 type DispatchContext struct {
 	AdvertisedIP string
 	HTTPPort     int
+	// ClientNetmask, if set, is emitted as `set net0/netmask <value>`
+	// in each matched arm right after dhcp. Use when pxe-beacon and
+	// the PXE client are on different L3 subnets that share L2 (e.g.
+	// Mac on Wi-Fi and client on wired LAN behind the same router).
+	// Widening to e.g. 255.255.0.0 makes iPXE treat pxe-beacon's IP
+	// as local and use direct ARP/L2 instead of going through the
+	// gateway. v0.5.11+.
+	ClientNetmask string
 }
 
 // RenderDispatch generates the full TFTP-served autoexec.ipxe for a
@@ -35,6 +43,7 @@ type DispatchContext struct {
 //     doesn't leave the operator at a context-less iPXE shell.
 //   - A `sleep 3` precedes `shell` so the error message stays on
 //     screen on boards that clear on shell entry.
+//
 // RenderDispatch generates the per-MAC dispatch autoexec.ipxe script.
 // v0.5.11 restores the production dispatch after v0.5.9/v0.5.10's
 // diagnostics confirmed iPXE can both run our script AND reach
@@ -74,7 +83,7 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("# directly. No HTTP chain dependency.")
 	w("")
 	w("echo ==============================================")
-	w("echo pxe-beacon dispatch (v0.5.7)")
+	w("echo pxe-beacon dispatch (v0.5.11)")
 	w("echo   net0/mac       = ${net0/mac}")
 	w("echo   net0/mac:hxhyp = ${net0/mac:hexhyp}")
 	w("echo ==============================================")
@@ -176,6 +185,16 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 
 	// DHCP: needed for kernel/initrd HTTP fetch. (PXE expert fix #1.)
 	fmt.Fprintf(buf, "dhcp || goto %s_fail_dhcp\n", label)
+	// v0.5.11: optional netmask override for cross-subnet-L2-bridged
+	// topologies (e.g. Mac on Wi-Fi + PXE client on wired LAN behind
+	// the same router). DHCP gives a narrow /24 that doesn't include
+	// pxe-beacon's subnet; widening it makes iPXE use direct ARP/L2
+	// for pxe-beacon instead of going through a gateway that can't
+	// route between the two subnets.
+	if ctx.ClientNetmask != "" {
+		fmt.Fprintf(buf, "set net0/netmask %s\n", ctx.ClientNetmask)
+		fmt.Fprintf(buf, "echo pxe-beacon: widened net0/netmask to %s for cross-subnet routing\n", ctx.ClientNetmask)
+	}
 	w("imgfree")
 
 	switch m.Profile.Boot {
