@@ -1,0 +1,312 @@
+package proxydhcp
+
+import (
+	"errors"
+	"net"
+	"strings"
+	"testing"
+
+	"github.com/insomniacslk/dhcp/dhcpv4"
+	"github.com/insomniacslk/dhcp/iana"
+)
+
+// newDiscover crafts a synthetic DISCOVER closely matching what a UEFI
+// firmware sends in the wild. The "real fixture" PLAN section 5
+// envisages (discover.pcap) does not exist in this repo; these
+// synthetic builds use the same library that parses real captures, so
+// every option is encoded exactly as a real client would encode it.
+// PROGRESS.md notes this fallback.
+func newDiscover(t *testing.T, mac string, arch iana.Arch, vendorClass string, userClass string) *dhcpv4.DHCPv4 {
+	t.Helper()
+	hw, err := net.ParseMAC(mac)
+	if err != nil {
+		t.Fatalf("parse mac: %v", err)
+	}
+	mods := []dhcpv4.Modifier{
+		dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover),
+		dhcpv4.WithHwAddr(hw),
+	}
+	if vendorClass != "" {
+		mods = append(mods, dhcpv4.WithOption(dhcpv4.OptClassIdentifier(vendorClass)))
+	}
+	if userClass != "" {
+		// rfc=false matches what iPXE actually emits (single string,
+		// not the RFC 3004 length-prefixed multi-class form).
+		mods = append(mods, dhcpv4.WithUserClass(userClass, false))
+	}
+	// Encode option 93 as two big-endian bytes (one arch entry).
+	if arch != 0 || vendorClass != "" {
+		mods = append(mods, dhcpv4.WithOption(dhcpv4.OptGeneric(
+			dhcpv4.OptionClientSystemArchitectureType,
+			iana.Archs{arch}.ToBytes(),
+		)))
+	}
+	d, err := dhcpv4.New(mods...)
+	if err != nil {
+		t.Fatalf("new discover: %v", err)
+	}
+	return d
+}
+
+func defaultCfg() Config {
+	return Config{
+		AdvertisedIP:   net.ParseIP("10.0.0.5"),
+		HTTPPort:       8080,
+		IPXEScriptPath: "/boot.ipxe",
+	}
+}
+
+func TestBuildOffer_EFIx64_TFTP(t *testing.T) {
+	req := newDiscover(t, "58:47:ca:70:c7:c9", iana.EFI_X86_64, "PXEClient:Arch:00007:UNDI:003016", "")
+	reply, dec, err := BuildOffer(req, defaultCfg())
+	if err != nil {
+		t.Fatalf("BuildOffer: %v", err)
+	}
+	if reply == nil {
+		t.Fatal("reply is nil")
+	}
+	if dec.Stage != StageFirmwareTFTP {
+		t.Errorf("stage = %q, want %q", dec.Stage, StageFirmwareTFTP)
+	}
+	if dec.Transport != TransportTFTP {
+		t.Errorf("transport = %s, want TFTP", dec.Transport)
+	}
+	if dec.BootFile != "netboot.xyz.efi" {
+		t.Errorf("bootfile = %q, want netboot.xyz.efi", dec.BootFile)
+	}
+	if got := reply.MessageType(); got != dhcpv4.MessageTypeOffer {
+		t.Errorf("reply msg type = %s, want OFFER", got)
+	}
+	if got := reply.ServerIPAddr.String(); got != "10.0.0.5" {
+		t.Errorf("siaddr = %s, want 10.0.0.5", got)
+	}
+	if got := reply.YourIPAddr.String(); got != "0.0.0.0" {
+		t.Errorf("yiaddr = %s, want 0.0.0.0 (proxyDHCP MUST NOT assign IPs)", got)
+	}
+	if got := reply.BootFileName; got != "netboot.xyz.efi" {
+		t.Errorf("bootfile name = %q, want netboot.xyz.efi", got)
+	}
+	if got := reply.TFTPServerName(); got != "10.0.0.5" {
+		t.Errorf("opt 66 tftp server = %q, want 10.0.0.5", got)
+	}
+	if got := reply.ClassIdentifier(); !strings.HasPrefix(got, "PXEClient") {
+		t.Errorf("reply vendor class = %q, want PXEClient prefix", got)
+	}
+	if dec.UnknownArch {
+		t.Errorf("unknownArch = true, want false for EFI_X86_64")
+	}
+}
+
+func TestBuildOffer_HTTPBoot_x64(t *testing.T) {
+	req := newDiscover(t, "aa:bb:cc:dd:ee:ff", iana.EFI_X86_64_HTTP, "HTTPClient:Arch:00016:UNDI:003016", "")
+	reply, dec, err := BuildOffer(req, defaultCfg())
+	if err != nil {
+		t.Fatalf("BuildOffer: %v", err)
+	}
+	if dec.Stage != StageFirmwareHTTP {
+		t.Errorf("stage = %q, want %q", dec.Stage, StageFirmwareHTTP)
+	}
+	if dec.Transport != TransportHTTP {
+		t.Errorf("transport = %s, want HTTP", dec.Transport)
+	}
+	wantURL := "http://10.0.0.5:8080/netboot.xyz.efi"
+	if reply.BootFileName != wantURL {
+		t.Errorf("bootfile URL = %q, want %q", reply.BootFileName, wantURL)
+	}
+	// UEFI HTTP boot expects class identifier HTTPClient in OFFER.
+	if got := reply.ClassIdentifier(); got != "HTTPClient" {
+		t.Errorf("class identifier = %q, want HTTPClient", got)
+	}
+	if got := reply.YourIPAddr.String(); got != "0.0.0.0" {
+		t.Errorf("yiaddr = %s, want 0.0.0.0", got)
+	}
+}
+
+func TestBuildOffer_ARM64_TFTP(t *testing.T) {
+	req := newDiscover(t, "00:11:22:33:44:55", iana.EFI_ARM64, "PXEClient", "")
+	_, dec, err := BuildOffer(req, defaultCfg())
+	if err != nil {
+		t.Fatalf("BuildOffer: %v", err)
+	}
+	if dec.Stage != StageFirmwareTFTP {
+		t.Errorf("stage = %q, want firmware-TFTP", dec.Stage)
+	}
+	if dec.BootFile != "netboot.xyz-arm64.efi" {
+		t.Errorf("bootfile = %q, want netboot.xyz-arm64.efi", dec.BootFile)
+	}
+}
+
+func TestBuildOffer_ARM64_HTTPBoot(t *testing.T) {
+	req := newDiscover(t, "00:11:22:33:44:66", iana.EFI_ARM64_HTTP, "HTTPClient", "")
+	reply, dec, err := BuildOffer(req, defaultCfg())
+	if err != nil {
+		t.Fatalf("BuildOffer: %v", err)
+	}
+	if dec.Stage != StageFirmwareHTTP {
+		t.Errorf("stage = %q, want firmware-HTTP", dec.Stage)
+	}
+	if !strings.HasSuffix(reply.BootFileName, "/netboot.xyz-arm64.efi") {
+		t.Errorf("bootfile = %q, want /netboot.xyz-arm64.efi suffix", reply.BootFileName)
+	}
+}
+
+func TestBuildOffer_LegacyBIOS(t *testing.T) {
+	// PXE legacy BIOS clients often omit option 93 entirely. We should
+	// fall back to INTEL_X86PC and serve undionly.kpxe over TFTP.
+	hw, _ := net.ParseMAC("00:0c:29:aa:bb:cc")
+	req, err := dhcpv4.New(
+		dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover),
+		dhcpv4.WithHwAddr(hw),
+		dhcpv4.WithOption(dhcpv4.OptClassIdentifier("PXEClient")),
+	)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	_, dec, err := BuildOffer(req, defaultCfg())
+	if err != nil {
+		t.Fatalf("BuildOffer: %v", err)
+	}
+	if dec.SelectedArch != iana.INTEL_X86PC {
+		t.Errorf("selectedArch = %v, want INTEL_X86PC", dec.SelectedArch)
+	}
+	if dec.Transport != TransportTFTP {
+		t.Errorf("transport = %s, want TFTP", dec.Transport)
+	}
+	if dec.BootFile != "netboot.xyz.kpxe" {
+		t.Errorf("bootfile = %q, want netboot.xyz.kpxe", dec.BootFile)
+	}
+}
+
+func TestBuildOffer_iPXEUserClass_ServesScript(t *testing.T) {
+	// After iPXE chainloads, it re-DHCPs with userclass=iPXE. PLAN says
+	// we MUST serve the script (not the binary) here — that's what
+	// breaks the chainload loop.
+	req := newDiscover(t, "58:47:ca:70:c7:c9", iana.EFI_X86_64, "PXEClient:Arch:00007:UNDI:003016", "iPXE")
+	reply, dec, err := BuildOffer(req, defaultCfg())
+	if err != nil {
+		t.Fatalf("BuildOffer: %v", err)
+	}
+	if !dec.IsIPXEStage {
+		t.Errorf("IsIPXEStage = false, want true")
+	}
+	if dec.Stage != StageIPXEScript {
+		t.Errorf("stage = %q, want %q", dec.Stage, StageIPXEScript)
+	}
+	if dec.Transport != TransportHTTP {
+		t.Errorf("transport = %s, want HTTP", dec.Transport)
+	}
+	wantURL := "http://10.0.0.5:8080/boot.ipxe"
+	if reply.BootFileName != wantURL {
+		t.Errorf("bootfile = %q, want %q", reply.BootFileName, wantURL)
+	}
+	if got := reply.YourIPAddr.String(); got != "0.0.0.0" {
+		t.Errorf("yiaddr = %s, want 0.0.0.0 (proxyDHCP never assigns IPs)", got)
+	}
+}
+
+func TestBuildOffer_SkipsNonPXEAsBenign(t *testing.T) {
+	// A normal DHCP DISCOVER with no option 60 (e.g. a freshly-booted
+	// Linux box doing its own DHCP) MUST be silently skipped and
+	// labelled benign per PLAN section 0.
+	hw, _ := net.ParseMAC("aa:bb:cc:dd:ee:ff")
+	req, err := dhcpv4.New(
+		dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover),
+		dhcpv4.WithHwAddr(hw),
+	)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	reply, dec, err := BuildOffer(req, defaultCfg())
+	if !errors.Is(err, ErrSkip) {
+		t.Errorf("err = %v, want ErrSkip", err)
+	}
+	if reply != nil {
+		t.Errorf("reply = %v, want nil", reply)
+	}
+	if dec.Skip != SkipNotPXE {
+		t.Errorf("skip = %v, want SkipNotPXE", dec.Skip)
+	}
+	if !dec.IsBenignSkip() {
+		t.Errorf("IsBenignSkip = false, want true")
+	}
+}
+
+func TestBuildOffer_SkipsNonDiscoverNonRequest(t *testing.T) {
+	// An ACK (or anything that isn't DISCOVER/REQUEST) is never our
+	// job; skip with a non-benign reason.
+	hw, _ := net.ParseMAC("aa:bb:cc:dd:ee:ff")
+	req, err := dhcpv4.New(
+		dhcpv4.WithMessageType(dhcpv4.MessageTypeAck),
+		dhcpv4.WithHwAddr(hw),
+		dhcpv4.WithOption(dhcpv4.OptClassIdentifier("PXEClient")),
+	)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	_, dec, err := BuildOffer(req, defaultCfg())
+	if !errors.Is(err, ErrSkip) {
+		t.Errorf("err = %v, want ErrSkip", err)
+	}
+	if dec.Skip != SkipUnsupportedMessageType {
+		t.Errorf("skip = %v, want SkipUnsupportedMessageType", dec.Skip)
+	}
+}
+
+func TestBuildOffer_UnknownArchFallsBackAndFlags(t *testing.T) {
+	// Some firmware reports an arch we don't have a table entry for.
+	// We should pick the canonical fallback (EFI x86_64 over TFTP)
+	// and flag UnknownArch=true so the logger can shout about it.
+	req := newDiscover(t, "00:00:00:00:00:01", iana.Arch(0xfeed), "PXEClient", "")
+	_, dec, err := BuildOffer(req, defaultCfg())
+	if err != nil {
+		t.Fatalf("BuildOffer: %v", err)
+	}
+	if !dec.UnknownArch {
+		t.Errorf("UnknownArch = false, want true")
+	}
+	if dec.Transport != TransportTFTP {
+		t.Errorf("fallback transport = %s, want TFTP", dec.Transport)
+	}
+}
+
+func TestBuildOffer_VendorClassPXEClientSuffixed(t *testing.T) {
+	// Real-world PXEClient strings look like
+	// "PXEClient:Arch:00007:UNDI:003016" — must still be recognized.
+	req := newDiscover(t, "00:00:00:00:00:02", iana.EFI_X86_64, "PXEClient:Arch:00007:UNDI:003016", "")
+	_, dec, err := BuildOffer(req, defaultCfg())
+	if err != nil {
+		t.Fatalf("BuildOffer: %v", err)
+	}
+	if dec.Stage != StageFirmwareTFTP {
+		t.Errorf("stage = %q, want firmware-TFTP", dec.Stage)
+	}
+}
+
+func TestBuildOffer_PureFunction_NoSideEffectOnRequest(t *testing.T) {
+	// BuildOffer must not mutate its input. PLAN's purity rule
+	// motivates testing this directly.
+	req := newDiscover(t, "58:47:ca:70:c7:c9", iana.EFI_X86_64, "PXEClient", "")
+	before := req.Summary()
+	_, _, err := BuildOffer(req, defaultCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := req.Summary()
+	if before != after {
+		t.Errorf("BuildOffer mutated request:\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+func TestBuildOffer_RejectsBadConfig(t *testing.T) {
+	req := newDiscover(t, "00:00:00:00:00:03", iana.EFI_X86_64, "PXEClient", "")
+	// missing AdvertisedIP
+	if _, _, err := BuildOffer(req, Config{HTTPPort: 8080}); err == nil {
+		t.Error("expected error for missing AdvertisedIP")
+	}
+	// bad port
+	if _, _, err := BuildOffer(req, Config{
+		AdvertisedIP: net.ParseIP("10.0.0.5"), HTTPPort: 0,
+	}); err == nil {
+		t.Error("expected error for HTTPPort=0")
+	}
+}

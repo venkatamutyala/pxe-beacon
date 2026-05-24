@@ -7,13 +7,17 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"runtime"
 	"syscall"
+	"time"
 
 	"github.com/venkatamutyala/pxe-beacon/internal/assets"
 	"github.com/venkatamutyala/pxe-beacon/internal/narrlog"
+	"github.com/venkatamutyala/pxe-beacon/internal/netinfo"
+	"github.com/venkatamutyala/pxe-beacon/internal/proxydhcp"
 )
 
 // version is overridden via -ldflags at build time.
@@ -27,6 +31,7 @@ func main() {
 		flagLogLevel   = flag.String("loglevel", "info", "log level: error, warn, info, debug")
 		flagChainURL   = flag.String("chain-url", "https://boot.netboot.xyz/menu.ipxe", "URL the iPXE script chainloads")
 		flagIPXEScript = flag.String("ipxe-script", "", "path to a custom boot.ipxe template (overrides embedded default)")
+		flagAdvIP      = flag.String("advertise-ip", "", "override the advertised IPv4 (auto-detect if empty)")
 		flagPrintVer   = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -43,41 +48,76 @@ func main() {
 	}
 
 	log := narrlog.New("main", lvl, os.Stderr)
+	log.Infof("pxe-beacon %s starting (%s/%s)", version, runtime.GOOS, runtime.GOARCH)
 
-	// Startup banner. (M5 fleshes out interface/IP/WiFi detection; the M0
-	// banner just proves we wired flags + logging + embed.)
-	printBanner(log, *flagIface, *flagListen, *flagHTTPPort, *flagChainURL, *flagIPXEScript)
+	picked, err := netinfo.Pick(*flagIface)
+	if err != nil {
+		log.Errorf("interface selection: %v", err)
+		os.Exit(1)
+	}
+	advIP := picked.AdvertiseIP
+	if *flagAdvIP != "" {
+		ip := net.ParseIP(*flagAdvIP)
+		if ip == nil || ip.To4() == nil {
+			log.Errorf("invalid -advertise-ip %q (need IPv4)", *flagAdvIP)
+			os.Exit(2)
+		}
+		advIP = ip.To4()
+	}
+
+	log.Infof("interface=%s ipv4=%s http-port=%d listen=%s",
+		picked.Iface.Name, advIP, *flagHTTPPort, *flagListen)
+	if picked.IsWireless {
+		log.Warnf("interface %s looks wireless — TFTP may time out; prefer wired or document this", picked.Iface.Name)
+	}
+	log.Infof("chain-url=%s", *flagChainURL)
+	if *flagIPXEScript != "" {
+		log.Infof("using custom iPXE script: %s", *flagIPXEScript)
+	}
+
+	// Sanity-check the embedded asset wiring at startup so the user
+	// hears about it once, not from a TFTP RRQ minutes later.
+	if b, err := assets.ReadIPXE(assets.IPXEEFIx64); err != nil {
+		log.Warnf("embedded asset check failed: %v", err)
+	} else {
+		log.Infof("embedded netboot.xyz.efi ready (%d bytes)", len(b))
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := run(ctx, log); err != nil && !errors.Is(err, context.Canceled) {
-		log.Errorf("fatal: %v", err)
+	cfg := proxydhcp.Config{
+		AdvertisedIP:   advIP,
+		HTTPPort:       *flagHTTPPort,
+		IPXEScriptPath: "/boot.ipxe",
+	}
+
+	lst, err := proxydhcp.New(proxydhcp.ServerOptions{
+		Interface:       picked.Iface.Name,
+		ListenIP:        *flagListen,
+		Config:          cfg,
+		Logger:          log,
+		FollowUpTimeout: 10 * time.Second,
+	})
+	if err != nil {
+		log.Errorf("init proxydhcp: %v", err)
 		os.Exit(1)
+	}
+
+	errc := make(chan error, 1)
+	go func() {
+		errc <- lst.Serve(ctx)
+	}()
+
+	log.Infof("ready — press Ctrl-C to exit")
+	select {
+	case <-ctx.Done():
+	case err := <-errc:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Errorf("listener exited: %v", err)
+			os.Exit(1)
+		}
 	}
 	log.Infof("pxe-beacon: shutdown complete")
 }
 
-func printBanner(log *narrlog.Logger, iface, listen string, httpPort int, chainURL, scriptOverride string) {
-	log.Infof("pxe-beacon %s starting (%s/%s)", version, runtime.GOOS, runtime.GOARCH)
-	log.Infof("flags: interface=%q listen=%s http-port=%d chain-url=%s",
-		iface, listen, httpPort, chainURL)
-	if scriptOverride != "" {
-		log.Infof("using custom iPXE script: %s", scriptOverride)
-	}
-	// Confirm embed wiring as part of the startup check.
-	if b, err := assets.ReadIPXE(assets.IPXEEFIx64); err != nil {
-		log.Warnf("embedded asset check failed: %v", err)
-	} else {
-		log.Infof("embedded %s ready (%d bytes)", assets.IPXEEFIx64, len(b))
-	}
-}
-
-// run is the M0 placeholder. Later milestones wire up proxyDHCP, TFTP,
-// and HTTP goroutines here and block on ctx.Done().
-func run(ctx context.Context, log *narrlog.Logger) error {
-	log.Infof("ready — press Ctrl-C to exit (M0 scaffold: no services started yet)")
-	<-ctx.Done()
-	log.Infof("signal received, shutting down")
-	return nil
-}
