@@ -70,16 +70,11 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("echo   net0/mac:hxhyp = ${net0/mac:hexhyp}")
 	w("echo ==============================================")
 	w("")
-	// v0.5.16: 30-second sleep at the top of the script as a
-	// diagnostic for the autoboot-vs-shell-chain mismatch. venkat@'s
-	// shell test (manually `dhcp`+`set netmask`+`chain autoexec.ipxe`)
-	// boots Debian fine, but autoboot of the same script lands at
-	// netboot.xyz menu. Likely iPXE's network isn't fully initialized
-	// when autoexec.ipxe first runs in autoboot context. Sleeping
-	// before any network operation lets it settle. If 30s works we
-	// dial back to a more reasonable value in a follow-up.
-	w("echo pxe-beacon: settling 30s before network operations (autoboot timing diagnostic)")
-	w("sleep 30")
+	// v0.6.1: the v0.5.16 30-second autoboot timing diagnostic is
+	// removed. v0.6.0 (vanilla iPXE) confirmed via timing that our
+	// script DOES run in autoboot context now — that 30s+1s delay
+	// before iPXE-stage DHCP was just the sleep, not iPXE init.
+	//
 	// v0.5.13: dhcp + optional netmask widening at the TOP of the
 	// script, BEFORE iseq dispatch and BEFORE any chain to pxe-beacon.
 	// All matched arms inherit the resulting network state — no need
