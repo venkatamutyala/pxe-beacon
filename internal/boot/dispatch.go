@@ -67,7 +67,7 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("# the boot story unfold.")
 	w("")
 	w("echo ============================================================")
-	w("echo  pxe-beacon dispatch (v0.6.12) — BOOTIF restored (kernel picks the wired NIC)")
+	w("echo  pxe-beacon dispatch (v0.6.13) — ip=dhcp (kernel static config never brought eno1 up)")
 	w("echo ============================================================")
 	w("echo")
 	w("echo [stage 0/5] iPXE settings BEFORE dhcp")
@@ -246,14 +246,24 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	// values are the ones iPXE actually resolved at boot. autoconf
 	// is `none` (static), so the kernel doesn't re-DHCP and we keep
 	// the widened netmask.
+	// v0.6.13: just use ip=dhcp.
+	//
+	// History: v0.6.0-v0.6.12 tried `ip=${net0/ip}::${net0/gateway}:%s:::none`
+	// to statically configure the interface with a widened netmask
+	// at the kernel level. That cmdline string IS correctly emitted
+	// (verified by user dump of /proc/cmdline) but klibc-ipconfig
+	// on Debian-12 d-i isn't acting on it — interface stays DOWN.
+	// The user also confirmed `udhcpc -i eno1` brings the link up
+	// fine with DHCP. So we let DHCP do the bring-up.
+	//
+	// Trade-off: d-i now has the broken /24 netmask the DHCP server
+	// hands out, so HTTP fetches from pxe-beacon's cross-/24 IP
+	// can't be guaranteed. Will see in the wild whether the user's
+	// gateway routes between the /24s for TCP. If not, v0.6.14 will
+	// add a TFTP-served preseed path (TFTP works cross-/24 on this
+	// network — confirmed by firmware-stage TFTP working).
 	ipArg := "ip=dhcp"
-	if ctx.ClientNetmask != "" {
-		// v0.6.11: use explicit ${net0/...} form, not the unprefixed
-		// ${ip} and ${gateway} aliases. The unprefixed forms aren't
-		// reliably set on all iPXE builds — same family of issue
-		// as ${mac:hexhyp} from v0.5.2.
-		ipArg = fmt.Sprintf("ip=${net0/ip}::${net0/gateway}:%s:::none", ctx.ClientNetmask)
-	}
+	_ = ctx.ClientNetmask // late_command in preseed still uses this
 
 	w("")
 	addr := fmt.Sprintf("%s:%d", ctx.AdvertisedIP, ctx.HTTPPort)
