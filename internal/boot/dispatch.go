@@ -48,17 +48,25 @@ func RenderDispatch(f *fleet.Fleet, ctx DispatchContext) []byte {
 	// v0.5.10 once the diagnostic settles which class of bug we are
 	// hunting.
 	addr := fmt.Sprintf("%s:%d", ctx.AdvertisedIP, ctx.HTTPPort)
+	// v0.5.10 diagnostic: multiple iPXE primitives across both
+	// protocols. TFTP filenames have no slashes (some TFTP path
+	// handlers reject "/"). Each probe is a distinct filename so we
+	// can tell exactly which primitive worked.
 	diagnostic := fmt.Sprintf(`#!ipxe
-echo PXE-BEACON DIAGNOSTIC v0.5.9
+echo PXE-BEACON DIAGNOSTIC v0.5.10
 echo -- if you can read this, iPXE IS running our autoexec.ipxe --
-chain --autofree tftp://%s/probe/pre-dhcp || echo TFTP_PRE_DHCP_FAILED
+imgfetch tftp://%s/probe-imgfetch-pre noop1 || echo IMGFETCH_TFTP_PRE_FAILED
+chain --autofree tftp://%s/probe-chain-pre || echo CHAIN_TFTP_PRE_FAILED
 dhcp || echo DHCP_COMMAND_FAILED
-chain --autofree tftp://%s/probe/post-dhcp || echo TFTP_POST_DHCP_FAILED
-chain --autofree http://%s/debug/probe/post-dhcp || echo HTTP_POST_DHCP_FAILED
-echo -- all probes attempted, sleeping 30s before reboot --
+echo -- post-dhcp ip=${ip} gw=${gateway} dns=${dns} --
+imgfetch tftp://%s/probe-imgfetch-post noop2 || echo IMGFETCH_TFTP_POST_FAILED
+chain --autofree tftp://%s/probe-chain-post || echo CHAIN_TFTP_POST_FAILED
+imgfetch http://%s/debug/probe/imgfetch-http noop3 || echo IMGFETCH_HTTP_FAILED
+chain --autofree http://%s/debug/probe/chain-http || echo CHAIN_HTTP_FAILED
+echo -- all probes attempted; sleeping 30s before reboot --
 sleep 30
 reboot
-`, ctx.AdvertisedIP, ctx.AdvertisedIP, addr)
+`, ctx.AdvertisedIP, ctx.AdvertisedIP, ctx.AdvertisedIP, ctx.AdvertisedIP, addr, addr)
 	_ = f
 	return []byte(diagnostic)
 }

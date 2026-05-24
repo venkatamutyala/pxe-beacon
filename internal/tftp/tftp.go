@@ -111,14 +111,21 @@ func (s *Server) readHandler(filename string, rf io.ReaderFrom) error {
 		logPath = fmt.Sprintf("%s (leaf=%s)", filename, leaf)
 	}
 
-	// v0.5.6: TFTP probe — the dispatch script may RRQ filenames like
-	// `probe/net0/58-47-ca-70-c7-c9` or `probe/ip/10.69.7.218`. Log
-	// the requested filename and serve an empty body. This is the
-	// known-good fallback when iPXE's TCP/HTTP doesn't work on a
-	// given firmware (e.g. some AMI SNP drivers).
+	// v0.5.10: unconditional info log for EVERY incoming RRQ. The
+	// v0.5.6+ probe story has had multiple silent-failure modes; this
+	// makes "did iPXE attempt a TFTP request at all" answerable
+	// without ambiguity.
+	s.log.Infof("TFTP RRQ received: filename=%q leaf=%q", filename, leaf)
+
+	// v0.5.6+: TFTP probe — the dispatch script may RRQ filenames like
+	// `probe/foo`, `probe-foo`, or `probe.foo`. Match liberally so
+	// iPXE-side URL/path quirks don't keep us from logging the probe.
 	normalized := strings.ReplaceAll(filename, "\\", "/")
-	if strings.HasPrefix(normalized, "probe/") {
-		s.log.Infof("iPXE-state via TFTP from client: %s", strings.TrimPrefix(normalized, "probe/"))
+	normalized = strings.TrimPrefix(normalized, "/")
+	if strings.HasPrefix(normalized, "probe/") ||
+		strings.HasPrefix(normalized, "probe-") ||
+		strings.HasPrefix(normalized, "probe.") {
+		s.log.Infof("iPXE-state via TFTP from client: %s", normalized)
 		// Serve a 1-byte file. Some iPXE builds error on zero-byte
 		// transfers; a single newline is the safest minimum.
 		body := []byte("\n")
@@ -149,6 +156,7 @@ func (s *Server) readHandler(filename string, rf io.ReaderFrom) error {
 				}
 				return err
 			}
+			s.log.Infof("TFTP RRQ %q -> served autoexec script (%d bytes) ok", filename, len(body))
 			if s.tracker != nil {
 				s.tracker.NoteServed("tftp-anon")
 			}
