@@ -45,28 +45,21 @@ func RenderDispatch(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("# directly. No HTTP chain dependency.")
 	w("")
 	w("echo ==============================================")
-	w("echo pxe-beacon dispatch (v0.5.4)")
+	w("echo pxe-beacon dispatch (v0.5.5)")
 	w("echo   net0/mac       = ${net0/mac}")
 	w("echo   net0/mac:hxhyp = ${net0/mac:hexhyp}")
 	w("echo   net1/mac:hxhyp = ${net1/mac:hexhyp}")
 	w("echo ==============================================")
 	w("")
-	// v0.5.4: phone-home. Before iseq dispatch, hit the pxe-beacon
-	// /debug/iPXE-state HTTP route with every MAC + network setting
-	// iPXE knows about. The SERVER LOGS this. Diagnosing 'iseq does
-	// not match' or 'kernel fetch hangs' problems no longer requires
-	// reading the client's screen — it lands directly in
-	// pxe-beacon's stdout.
-	//
-	// We do an explicit dhcp first so ${ip}/${gateway}/${dns} are
-	// populated (firmware DHCP state isn't always carried over).
-	// Chain-style probe (not imgfetch) because chain supports query
-	// strings on every iPXE build; imgfetch's URL handling varies.
-	fmt.Fprintf(&buf, "echo pxe-beacon: phoning home to %s:%d/debug/iPXE-state (server logs the values)\n",
+	// v0.5.5: phone-home FIRST — no dhcp prerequisite. iPXE inherits
+	// the firmware DHCP state (it just used it to TFTP autoexec.ipxe
+	// from us), so HTTP to the same pxe-beacon address works without
+	// re-running dhcp. v0.5.4 put dhcp before the chain and got stuck
+	// in 30s+ of iPXE DHCP-retry before the phone-home fired.
+	fmt.Fprintf(&buf, "echo pxe-beacon: phoning home to %s:%d/debug/iPXE-state\n",
 		ctx.AdvertisedIP, ctx.HTTPPort)
-	w("dhcp || echo pxe-beacon: probe dhcp failed (continuing anyway)")
 	fmt.Fprintf(&buf,
-		"chain --autofree http://%s:%d/debug/iPXE-state?stage=before-iseq&mac=${net0/mac:hexhyp}&net0=${net0/mac:hexhyp}&net1=${net1/mac:hexhyp}&net2=${net2/mac:hexhyp}&net3=${net3/mac:hexhyp}&ip=${ip}&gateway=${gateway}&dns=${dns}&platform=${platform}&buildarch=${buildarch}&version=${version} || echo pxe-beacon: phone-home failed (pxe-beacon unreachable from this NIC?)\n",
+		"chain --autofree http://%s:%d/debug/iPXE-state?stage=before-iseq&net0=${net0/mac:hexhyp}&net1=${net1/mac:hexhyp}&net2=${net2/mac:hexhyp}&net3=${net3/mac:hexhyp}&ip=${ip}&gateway=${gateway}&dns=${dns}&platform=${platform}&buildarch=${buildarch}&version=${version} || echo pxe-beacon: phone-home failed (HTTP to pxe-beacon unreachable from this NIC)\n",
 		ctx.AdvertisedIP, ctx.HTTPPort)
 	w("")
 
