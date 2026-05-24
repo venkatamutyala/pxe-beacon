@@ -216,20 +216,29 @@ func (l *Listener) notePending(mac string) {
 	if l.opts.FollowUpTimeout <= 0 || mac == "" {
 		return
 	}
+	now := time.Now()
 	l.pendingMu.Lock()
-	l.pending[mac] = time.Now()
+	l.pending[mac] = now
 	l.pendingMu.Unlock()
 
 	timeout := l.opts.FollowUpTimeout
 	go func() {
 		time.Sleep(timeout)
 		l.pendingMu.Lock()
-		_, still := l.pending[mac]
-		if still {
+		t, still := l.pending[mac]
+		// Only fire if THIS goroutine's OFFER is the latest one
+		// pending for this MAC. If another OFFER landed in the
+		// meantime, the timestamp will be newer and this older
+		// goroutine should silently exit — that newer OFFER has
+		// its own hint goroutine which will fire (or not) based on
+		// its own progress. Without this check we'd hint-spam on
+		// every OFFER retry within the timeout window.
+		shouldFire := still && t.Equal(now)
+		if shouldFire {
 			delete(l.pending, mac)
 		}
 		l.pendingMu.Unlock()
-		if still {
+		if shouldFire {
 			l.log.Hint("client %s got the OFFER but never fetched within %s — "+
 				"check same-segment, firewall, and that advertised IP %s is reachable from the client",
 				mac, timeout, l.opts.Config.AdvertisedIP)

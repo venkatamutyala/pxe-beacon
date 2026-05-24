@@ -154,6 +154,16 @@ func TestRedirectorScript(t *testing.T) {
 	if !strings.Contains(s, "http://10.0.0.5:8080/autoinstall/") {
 		t.Errorf("redirector URL malformed:\n%s", s)
 	}
+	// v0.4.1 regression guard: autoexec.ipxe runs before embed.ipxe
+	// runs dhcp, so the redirector MUST do dhcp itself before
+	// trying to chain HTTP. Without this, iPXE has no IP, the
+	// chain silently fails, and iPXE falls back to its embedded
+	// netboot.xyz chain — which is exactly what user reports
+	// looked like "v0.4.0 still loaded netboot.xyz" even though
+	// per-MAC routing was correctly configured.
+	if !strings.Contains(s, "dhcp") {
+		t.Errorf("redirector must run dhcp before HTTP chain (v0.4.1):\n%s", s)
+	}
 }
 
 func TestRenderAutoexec_MACFallback(t *testing.T) {

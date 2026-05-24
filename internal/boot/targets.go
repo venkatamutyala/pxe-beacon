@@ -110,13 +110,28 @@ func RenderCustom(path string, ctx RenderContext) ([]byte, error) {
 // the remote address in the read handler, and the MAC isn't in the
 // TFTP RRQ packet. iPXE's variable substitution gives us a clean
 // per-MAC dispatch via the chained HTTP fetch.
+//
+// IMPORTANT — autoexec.ipxe runs BEFORE iPXE's embed.ipxe runs the
+// `dhcp` command. If we don't acquire networking here first, the
+// HTTP chain to our server silently fails (iPXE has no IP yet)
+// and iPXE falls through to its embedded netboot.xyz chain. This
+// was the bug behind "v0.4.0 still loaded netboot.xyz" — a real
+// PXE boot has UEFI's SNP already configured by the firmware, but
+// iPXE itself needs `dhcp` to pull that config into its own state.
 func RedirectorScript(advertisedIP string, httpPort int) []byte {
 	return []byte(fmt.Sprintf(`#!ipxe
 # pxe-beacon: per-machine override redirector. iPXE substitutes the
 # client's MAC into the URL below and fetches the per-machine
 # autoexec.ipxe from our HTTP server, which does the real dispatch.
+#
+# DHCP first — autoexec.ipxe runs before iPXE's embed.ipxe runs
+# its own dhcp, so we need to acquire networking ourselves before
+# chaining HTTP. Without this the chain silently fails and iPXE
+# falls back to its embedded netboot.xyz chain (this was the v0.4.0
+# bug).
+dhcp || echo pxe-beacon: dhcp failed in autoexec; falling back to embed
 chain --replace --autofree http://%s:%d/autoinstall/${net0/mac:hexhyp}/autoexec.ipxe || \
-echo pxe-beacon: HTTP override unreachable; iPXE will use its embedded chain
+echo pxe-beacon: HTTP override unreachable; falling back to embed
 exit
 `, advertisedIP, httpPort))
 }
