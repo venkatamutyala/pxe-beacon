@@ -24,6 +24,7 @@ import (
 
 	"github.com/venkatamutyala/pxe-beacon/internal/assets"
 	"github.com/venkatamutyala/pxe-beacon/internal/boot"
+	"github.com/venkatamutyala/pxe-beacon/internal/cache"
 	"github.com/venkatamutyala/pxe-beacon/internal/fleet"
 	"github.com/venkatamutyala/pxe-beacon/internal/narrlog"
 )
@@ -54,6 +55,12 @@ type Options struct {
 	// FleetStatus is the in-memory tracker the autoinstall and
 	// status handlers update + read. Required when Fleet is non-nil.
 	FleetStatus *fleet.Tracker
+	// DataDir is the on-disk directory populated by
+	// `pxe-beacon fetch <target>`. When set, /assets/<target>/<file>
+	// serves files from this directory. v0.4+ for Ubuntu Subiquity
+	// autoinstall (the kernel + initrd + filesystem.squashfs that
+	// don't exist as flat HTTP files anywhere upstream).
+	DataDir string
 }
 
 // Server is the pxe-beacon HTTP server.
@@ -165,6 +172,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /autoinstall/{mac}/done", s.handleInstallerDone)
 	s.mux.HandleFunc("GET /status", s.handleStatusHTML)
 	s.mux.HandleFunc("GET /status.json", s.handleStatusJSON)
+	s.mux.HandleFunc("GET /assets/{target}/{file}", s.handleAsset)
 }
 
 // macHyphen is what iPXE's ${net0/mac:hexhyp} produces and what we
@@ -454,6 +462,55 @@ func (s *Server) handleInstallerDone(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	_, _ = io.WriteString(w, body)
 	s.log.Infof("POST %s -> 200, phone_home received [client=%s]", r.URL.Path, labelOf(p.Name, mac))
+}
+
+// handleAsset serves a file from DataDir/<target>/<file>. The target
+// + file names are validated to reject path traversal (cache.AssetPath
+// does the check). Used by the Ubuntu autoexec templates to fetch
+// vmlinuz / initrd / filesystem.squashfs that `pxe-beacon fetch`
+// previously extracted from the live-server ISO.
+func (s *Server) handleAsset(w http.ResponseWriter, r *http.Request) {
+	target := r.PathValue("target")
+	file := r.PathValue("file")
+	if s.opts.DataDir == "" {
+		http.Error(w, "asset serving disabled — start pxe-beacon with -data-dir or run `pxe-beacon fetch "+target+"` first", http.StatusNotFound)
+		return
+	}
+	c, err := cache.New(s.opts.DataDir)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("data dir: %v", err), http.StatusInternalServerError)
+		return
+	}
+	path, err := c.AssetPath(target, file)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, fmt.Sprintf("asset %s/%s not found — run `pxe-beacon fetch %s` to populate it", target, file, target), http.StatusNotFound)
+			s.log.Warnf("GET %s -> 404 (file not in data dir; pxe-beacon fetch needed)", r.URL.Path)
+			return
+		}
+		http.Error(w, fmt.Sprintf("open: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("stat: %v", err), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		s.log.Infof("HEAD %s -> 200, %d bytes (asset)", r.URL.Path, fi.Size())
+		return
+	}
+	http.ServeContent(w, r, file, fi.ModTime(), f)
+	s.log.Infof("GET %s -> 200, %d bytes (asset, %s)", r.URL.Path, fi.Size(), r.RemoteAddr)
 }
 
 // handleStatusJSON renders the in-memory tracker snapshot as JSON.

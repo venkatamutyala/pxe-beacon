@@ -29,6 +29,23 @@ import (
 var version = "dev"
 
 func main() {
+	// Subcommand dispatch. `pxe-beacon` with no args (or only flags)
+	// continues to mean "run the server" — preserving v0.3 and
+	// earlier behavior. Only known subcommand keywords trigger
+	// dispatch.
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "fetch":
+			runFetch(os.Args[2:])
+			return
+		case "serve":
+			// Allow explicit `pxe-beacon serve [flags]`. Shift args
+			// so the rest of main() sees them as if no subcommand
+			// was passed.
+			os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
+		}
+	}
+
 	var (
 		flagIface      = flag.String("interface", "", "network interface to advertise (auto-detect if empty)")
 		flagListen     = flag.String("listen", "0.0.0.0", "address to bind UDP sockets on")
@@ -41,6 +58,7 @@ func main() {
 		flagCrossCert  = flag.Bool("crosscert", false, "emit `set crosscert http://ca.ipxe.org/auto` in boot.ipxe (helps older iPXE builds with HTTPS netboot.xyz)")
 		flagHintAfter  = flag.Duration("hint-after", 10*time.Second, "log a 'client never fetched' hint this long after an OFFER if no follow-up arrives (0 disables)")
 		flagConfig     = flag.String("config", "", "path to fleet.yaml — enables per-MAC routing, autoinstall, and /status page (unset = v0.1.3 single-machine behavior)")
+		flagDataDir    = flag.String("data-dir", defaultDataDir(), "directory holding extracted distro assets (populated by `pxe-beacon fetch`); served at /assets/<target>/<file>")
 		flagPrintVer   = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Usage = func() {
@@ -153,6 +171,7 @@ func main() {
 		Tracker:        lst,
 		Fleet:          fl,
 		FleetStatus:    statusTracker,
+		DataDir:        *flagDataDir,
 	})
 	if err != nil {
 		log.Errorf("init http: %v", err)

@@ -57,11 +57,13 @@ func TestRenderAutoexec_Ubuntu2204(t *testing.T) {
 		"#!ipxe",
 		"autoinstall",
 		"ds=nocloud-net",
-		"10.0.0.5",          // AdvertisedIP
-		"8080",              // HTTPPort
-		"58-47-ca-70-c7-c9", // MACHyp
-		"casper/vmlinuz",    // Ubuntu kernel path
-		"casper/initrd",     // initrd
+		"10.0.0.5",                      // AdvertisedIP
+		"8080",                          // HTTPPort
+		"58-47-ca-70-c7-c9",             // MACHyp
+		"/assets/ubuntu-22.04",          // assets base URL (template uses iPXE ${assets} after)
+		"${assets}/vmlinuz",             // kernel path via var
+		"${assets}/filesystem.squashfs", // squashfs path
+		"boot=casper",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("ubuntu-22.04 autoexec missing %q:\n%s", want, s)
@@ -74,8 +76,11 @@ func TestRenderAutoexec_Ubuntu2404(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "24.04") {
-		t.Errorf("ubuntu-24.04 autoexec missing version:\n%s", out)
+	s := string(out)
+	for _, want := range []string{"24.04", "/assets/ubuntu-24.04", "${assets}/vmlinuz", "boot=casper"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("ubuntu-24.04 autoexec missing %q:\n%s", want, s)
+		}
 	}
 }
 

@@ -1,41 +1,35 @@
 #!ipxe
-# pxe-beacon: target=ubuntu-22.04
+# pxe-beacon: target=ubuntu-22.04 — unattended Subiquity autoinstall.
 #
-# *** v0.2.x STATUS: KERNEL URL TBD — not functional yet. ***
-# Ubuntu doesn't publish casper/vmlinuz as flat HTTP files. The URLs
-# below are placeholders that 404. Real autoinstall needs either
-# (a) a `pxe-beacon fetch ubuntu-22.04` subcommand that extracts the
-# ISO into a local cache (v0.2.x roadmap), or (b) chaining through
-# netboot.xyz's per-distro recipe with imgargs injection. Tracking
-# in PROGRESS.md for v0.2.1+.
+# Prerequisite (one-time per data-dir):
+#   pxe-beacon fetch ubuntu-22.04
+# That extracts casper/{vmlinuz,initrd,filesystem.squashfs} from the
+# Ubuntu live-server ISO into ${data-dir}/ubuntu-22.04/. pxe-beacon
+# then serves those over /assets/ubuntu-22.04/<file>.
 #
-# Until fixed: don't use this target. Use `boot: menu` (interactive
-# netboot.xyz menu) or `boot: custom` with your own iPXE script
-# pointing at known-working kernel URLs.
-#
-# Vars rendered by Go text/template at request time:
-#   {{.Name}}          machine display name (from fleet.yaml)
-#   {{.MAC}}           canonical colon-MAC (lowercase)
-#   {{.MACHyp}}        hyphen-MAC for URL paths
-#   {{.AdvertisedIP}}  pxe-beacon server IP
-#   {{.HTTPPort}}      pxe-beacon HTTP port
+# Boot sequence:
+#   1. iPXE downloads vmlinuz + initrd from /assets/ubuntu-22.04/.
+#   2. The kernel boots; casper initramfs sees `url=...squashfs` and
+#      pulls the root filesystem.
+#   3. autoinstall + ds=nocloud-net points Subiquity at our
+#      /autoinstall/<mac>/user-data + meta-data.
+#   4. Subiquity runs the unattended install, reboots, cloud-init
+#      runs the operator's user-data (the same one we serve).
 echo pxe-beacon: {{.Name}} ({{.MAC}}) -> ubuntu-22.04 autoinstall
 
 set base http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}
-set src http://releases.ubuntu.com/22.04/ubuntu-22.04.5-live-server-amd64.iso
+set assets http://{{.AdvertisedIP}}:{{.HTTPPort}}/assets/ubuntu-22.04
 
-# Subiquity netboot: kernel and initrd live inside the ISO at /casper/.
-# iPXE's HTTP can't extract from an ISO, so the convention is to
-# chain through netboot.xyz which hosts the extracted artifacts —
-# OR provide them yourself via -data dir (future v0.2.x).
-# For v0.2.0 we chain through netboot.xyz then override the kernel
-# args with our autoinstall directive via imgargs.
 imgfree
-kernel --name vmlinuz http://boot.netboot.xyz/os/ubuntu/22.04/casper/vmlinuz \
-  initrd=initrd.gz \
-  ip=dhcp ipv6.disable=1 \
+kernel --name vmlinuz ${assets}/vmlinuz \
+  initrd=initrd \
+  ip=dhcp \
+  ipv6.disable=1 \
+  boot=casper \
+  url=${assets}/filesystem.squashfs \
   cloud-config-url=/dev/null \
-  autoinstall ds=nocloud-net\;s=${base}/ \
-  --- quiet
-initrd --name initrd.gz http://boot.netboot.xyz/os/ubuntu/22.04/casper/initrd
+  autoinstall \
+  ds=nocloud-net\;s=${base}/ \
+  ---
+initrd --name initrd ${assets}/initrd
 boot || shell

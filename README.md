@@ -140,14 +140,36 @@ machines:
 
 Built-in `boot:` values:
 
-| value          | side-files required           | what happens                                                                 |
-|----------------|-------------------------------|------------------------------------------------------------------------------|
-| `menu`         | —                             | netboot.xyz interactive menu (default for unknown MACs)                      |
-| `ubuntu-22.04` | `cloud_init:` (URLs TBD)      | Subiquity autoinstall via cloud-init — **kernel URL TBD, currently broken** |
-| `ubuntu-24.04` | `cloud_init:` (URLs TBD)      | Subiquity autoinstall via cloud-init — **kernel URL TBD, currently broken** |
-| `debian-12`    | `preseed:` (+optional `cloud_init:`) | unattended d-i via preseed; if `cloud_init:` is also set, cloud-init runs on first boot of the installed system (auto-bridged) |
-| `debian-13`    | `preseed:` (+optional `cloud_init:`) | same as `debian-12` but Trixie's kernel/initrd                       |
-| `custom`       | `ipxe_script:`                | serve the operator-provided iPXE script verbatim (Go-templated)              |
+| value          | side-files required                    | one-time setup                              | what happens                                                                 |
+|----------------|----------------------------------------|---------------------------------------------|------------------------------------------------------------------------------|
+| `menu`         | —                                      | —                                           | netboot.xyz interactive menu (default for unknown MACs)                      |
+| `ubuntu-22.04` | `cloud_init:`                          | `pxe-beacon fetch ubuntu-22.04`             | Subiquity autoinstall via cloud-init — fully unattended                      |
+| `ubuntu-24.04` | `cloud_init:`                          | `pxe-beacon fetch ubuntu-24.04`             | Subiquity autoinstall via cloud-init — fully unattended                      |
+| `debian-12`    | `preseed:` (+optional `cloud_init:`)   | —                                           | unattended d-i via preseed; if `cloud_init:` is also set, cloud-init runs on first boot of the installed system (auto-bridged) |
+| `debian-13`    | `preseed:` (+optional `cloud_init:`)   | —                                           | same as `debian-12` but Trixie's kernel/initrd                               |
+| `custom`       | `ipxe_script:`                         | —                                           | serve the operator-provided iPXE script verbatim (Go-templated)              |
+
+**`pxe-beacon fetch <target>`** is a one-time-per-distro operator
+step. Ubuntu's Subiquity kernel + initrd + filesystem.squashfs only
+live inside the live-server ISO; fetch downloads the ISO (~1.5 GB),
+extracts those three files into `-data-dir` (default
+`~/.local/share/pxe-beacon`), and writes a manifest with SHA-256s.
+Idempotent — re-running is a no-op unless `-force` is passed. After
+fetching, pxe-beacon serves them over `/assets/<target>/<file>`. No
+root needed for the fetch step.
+
+```bash
+pxe-beacon fetch ubuntu-22.04
+# fetch: target = ubuntu-22.04
+# fetch: source = https://releases.ubuntu.com/22.04/ubuntu-22.04.5-live-server-amd64.iso
+# fetch: downloading ISO (this is ~1.5GB, several minutes on most links)…
+# fetch: 1.4 GB / 1.4 GB (100.0%)
+# fetch: extracted:
+#   ubuntu-22.04/vmlinuz                 14.0 MB   sha256=8a2b3c4d5e6f…
+#   ubuntu-22.04/initrd                  74.2 MB   sha256=1234567890ab…
+#   ubuntu-22.04/filesystem.squashfs      1.3 GB   sha256=abcdef012345…
+# fetch: done.
+```
 
 **Debian preseed + cloud-init bridge.** Debian's d-i installer doesn't
 read cloud-init / NoCloud (verified May 2026 against Trixie's
@@ -206,6 +228,7 @@ minutes get a ⚠ stalled flag. JSON version at `/status.json`.
 | `-ipxe-script`   | (embedded)                                    | path to a custom `/boot.ipxe` template                 |
 | `-crosscert`     | off                                           | emit `set crosscert` (older iPXE + HTTPS chain target) |
 | `-hint-after`    | `10s`                                         | fire the "client never fetched" hint after this        |
+| `-data-dir`      | `~/.local/share/pxe-beacon`                   | dir holding `pxe-beacon fetch` output, served at `/assets/` |
 | `-loglevel`      | `info`                                        | `error`, `warn`, `info`, `debug`                       |
 
 `./pxe-beacon -help` for the full list. See [`RUN.md`](./RUN.md) for

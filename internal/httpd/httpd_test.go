@@ -567,6 +567,126 @@ func TestHTTP_Preseed_InteractiveStubWhenNoPreseed(t *testing.T) {
 	}
 }
 
+// ----- v0.4 /assets/ route tests -----
+
+func startFleetServerWithDataDir(t *testing.T) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	dataDir := t.TempDir()
+	// Seed an asset under data-dir/<target>/<file>.
+	tdir := filepath.Join(dataDir, "ubuntu-22.04")
+	if err := os.MkdirAll(tdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tdir, "vmlinuz"), []byte("FAKEVMLINUZ"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "fleet.yaml"), []byte(`
+defaults:
+  boot: menu
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logBuf := &bytes.Buffer{}
+	log := narrlog.New("test", narrlog.LevelDebug, logBuf)
+	f, err := fleet.Load(filepath.Join(dir, "fleet.yaml"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := fleet.NewTracker(f, 5*time.Second)
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	addr := ln.Addr().String()
+	_, portStr, _ := net.SplitHostPort(addr)
+	port, _ := strconv.Atoi(portStr)
+	_ = ln.Close()
+
+	s, err := New(Options{
+		Listen:       addr,
+		AdvertisedIP: "10.0.0.5",
+		HTTPPort:     port,
+		Logger:       log,
+		Fleet:        f,
+		FleetStatus:  tr,
+		DataDir:      dataDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = s.Serve(ctx); close(done) }()
+	time.Sleep(80 * time.Millisecond)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+		t.Logf("log dump:\n%s", logBuf.String())
+	})
+	return addr, dataDir
+}
+
+func TestHTTP_Assets_ServesFromDataDir(t *testing.T) {
+	addr, _ := startFleetServerWithDataDir(t)
+	resp, err := http.Get("http://" + addr + "/assets/ubuntu-22.04/vmlinuz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "FAKEVMLINUZ" {
+		t.Errorf("body = %q, want FAKEVMLINUZ", body)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/octet-stream" {
+		t.Errorf("Content-Type = %q, want application/octet-stream", ct)
+	}
+}
+
+func TestHTTP_Assets_404WhenFileMissing(t *testing.T) {
+	addr, _ := startFleetServerWithDataDir(t)
+	resp, err := http.Get("http://" + addr + "/assets/ubuntu-22.04/missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 (file not yet fetched)", resp.StatusCode)
+	}
+}
+
+func TestHTTP_Assets_RejectsTraversal(t *testing.T) {
+	addr, _ := startFleetServerWithDataDir(t)
+	// Built-in Go mux normalizes ../ at the URL level, so a direct
+	// path-traversal URL becomes something else. Test the named-
+	// segment path-traversal-via-name vector that the cache package
+	// guards against.
+	resp, err := http.Get("http://" + addr + "/assets/.dotfile/vmlinuz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for path-traversal target name", resp.StatusCode)
+	}
+}
+
+func TestHTTP_Assets_404WithoutDataDir(t *testing.T) {
+	// startFleetServer (the existing helper) doesn't set DataDir.
+	addr, _, _, _ := startFleetServer(t)
+	resp, err := http.Get("http://" + addr + "/assets/ubuntu-22.04/vmlinuz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 when DataDir unset", resp.StatusCode)
+	}
+}
+
 func TestHTTP_Autoexec_RejectsBadMAC(t *testing.T) {
 	addr, _, _, _ := startFleetServer(t)
 	resp, err := http.Get("http://" + addr + "/autoinstall/not-a-mac/autoexec.ipxe")

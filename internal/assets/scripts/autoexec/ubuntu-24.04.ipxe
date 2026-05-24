@@ -1,17 +1,22 @@
 #!ipxe
-# pxe-beacon: target=ubuntu-24.04
-# *** v0.2.x STATUS: KERNEL URL TBD — same situation as ubuntu-22.04. ***
-# See that template's header comment + PROGRESS.md v0.2.1 notes.
+# pxe-beacon: target=ubuntu-24.04 — Subiquity autoinstall.
+# Prerequisite: pxe-beacon fetch ubuntu-24.04
+# See ubuntu-22.04.ipxe header for the full flow.
 echo pxe-beacon: {{.Name}} ({{.MAC}}) -> ubuntu-24.04 autoinstall
 
 set base http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}
+set assets http://{{.AdvertisedIP}}:{{.HTTPPort}}/assets/ubuntu-24.04
 
 imgfree
-kernel --name vmlinuz http://boot.netboot.xyz/os/ubuntu/24.04/casper/vmlinuz \
-  initrd=initrd.gz \
-  ip=dhcp ipv6.disable=1 \
+kernel --name vmlinuz ${assets}/vmlinuz \
+  initrd=initrd \
+  ip=dhcp \
+  ipv6.disable=1 \
+  boot=casper \
+  url=${assets}/filesystem.squashfs \
   cloud-config-url=/dev/null \
-  autoinstall ds=nocloud-net\;s=${base}/ \
-  --- quiet
-initrd --name initrd.gz http://boot.netboot.xyz/os/ubuntu/24.04/casper/initrd
+  autoinstall \
+  ds=nocloud-net\;s=${base}/ \
+  ---
+initrd --name initrd ${assets}/initrd
 boot || shell

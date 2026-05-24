@@ -762,6 +762,112 @@ Debian.
 
 ---
 
+## v0.4.0 — `pxe-beacon fetch <target>` for Ubuntu autoinstall
+
+The last broken piece of v0.2/v0.3: Ubuntu Subiquity needs three
+files (vmlinuz, initrd, filesystem.squashfs) that don't exist as
+flat HTTP files on any upstream mirror — they only live inside the
+live-server ISO. v0.4 fixes that with a one-time-per-distro
+operator step.
+
+### What landed
+
+**New package `internal/cache/`:**
+- `Cache` rooted at a data-dir. Per-target subdirs:
+  `<dir>/ubuntu-22.04/{vmlinuz,initrd,filesystem.squashfs,
+  .pxe-beacon-fetched}`. The marker file is a JSON manifest
+  (source URL, fetched-at timestamp, SHA-256 per asset).
+- `Cache.Fetch(ctx, target, opts)`: downloads the live-server ISO
+  to a temp file, opens it via `kdomanski/iso9660`, walks to each
+  AssetFile path, streams to atomic `.part` → final rename, writes
+  manifest, deletes the ~1.5 GB ISO when done. Idempotent —
+  `IsPopulated` checks the manifest + file sizes, re-runs no-op
+  unless `-force` is passed.
+- `safeTargetName` / `safeAssetName` reject `..` / `/` / leading
+  `.` to prevent path traversal in the HTTP server's `/assets/`
+  route.
+- `Targets` registry has ubuntu-22.04 (22.04.5) and ubuntu-24.04
+  (24.04.4). Adding a target = one row in the registry +
+  optionally a new autoexec template.
+
+**New subcommand `pxe-beacon fetch <target> [-data-dir <path>] [-force]`:**
+- `cmd/pxe-beacon/fetch.go`. Dispatch logic in `main.go` checks
+  `os.Args[1]` — `fetch` triggers `runFetch`, anything else
+  (including no args) runs the server as before. Drop-in compat.
+- Progress printer: `XX.X MB / YY.Y MB (zz%)` over `\r`,
+  throttled to ~5/sec.
+- Default `-data-dir` is `$XDG_DATA_HOME/pxe-beacon` or
+  `~/.local/share/pxe-beacon` (no root needed for the fetch step).
+
+**New HTTP route `GET /assets/{target}/{file}` in `internal/httpd/`:**
+- Reads from `Options.DataDir`. When the data-dir isn't set or the
+  file hasn't been fetched, returns a helpful 404 telling the
+  operator the exact `pxe-beacon fetch <target>` command to run.
+- Path validation through `cache.AssetPath` — rejects path
+  traversal at the URL level.
+- Sets `Content-Type: application/octet-stream`,
+  `Content-Length`, supports HEAD. Uses `http.ServeContent` so
+  Range requests work (Subiquity does range-fetches on the
+  squashfs).
+
+**Ubuntu autoexec templates rewritten** to point at the new
+`/assets/` URLs. iPXE kernel cmdline now includes
+`boot=casper url=…/filesystem.squashfs autoinstall ds=nocloud-net;…`
+— the canonical Subiquity-over-PXE pattern. The templates carry
+an explicit "prerequisite: `pxe-beacon fetch ubuntu-22.04`" header
+comment.
+
+**`-data-dir` flag added to the server invocation** with the
+same default. Threaded into httpd.Options.
+
+### Tests (10 new, all green)
+
+`internal/cache/` (8): `TestSafeTargetName` (path-traversal),
+`TestCache_TargetDir` / `_AssetPath_RejectsTraversal`,
+`TestCache_IsPopulated_FalseWhenEmpty` / `_TrueAfterWrite`,
+`TestSHA256File`, `TestNormalizeISOName`,
+`TestTargetsHaveAllAssetPaths`.
+
+`internal/httpd/` (4 new): `TestHTTP_Assets_ServesFromDataDir`,
+`TestHTTP_Assets_404WhenFileMissing` (verifies the helpful
+"run pxe-beacon fetch" message),
+`TestHTTP_Assets_RejectsTraversal`,
+`TestHTTP_Assets_404WithoutDataDir`.
+
+### What an Ubuntu autoinstall now looks like end-to-end
+
+```
+# One-time per distro (no root, ~1.5 GB download):
+pxe-beacon fetch ubuntu-22.04
+
+# Then run the server as usual:
+sudo pxe-beacon -config /etc/pxe-beacon/fleet.yaml \
+                -data-dir ~/.local/share/pxe-beacon
+
+# On the client:
+#   firmware DHCP -> OFFER -> TFTP iPXE (snponly)
+#   iPXE TFTP autoexec.ipxe (redirector) -> HTTP /autoinstall/<mac>/autoexec.ipxe
+#   iPXE kernel http://server/assets/ubuntu-22.04/vmlinuz boot=casper
+#                url=http://server/assets/ubuntu-22.04/filesystem.squashfs
+#                autoinstall ds=nocloud-net;s=http://server/autoinstall/<mac>/
+#   iPXE initrd http://server/assets/ubuntu-22.04/initrd
+#   casper mounts the squashfs -> Subiquity boots
+#   Subiquity reads user-data + meta-data -> unattended install
+#   Reboot -> cloud-init phone_home -> /status shows installer-done
+```
+
+### What's still deferred
+
+- Local Debian cache (Debian's netboot kernel + initrd are
+  already flat files on deb.debian.org; we point at them
+  directly, no fetch needed). If airgapped Debian becomes a
+  requirement, mirror those URLs into the cache too.
+- Real `discover.pcap` test fixture.
+- Per-MAC `data_dir` (currently global) — would be useful for
+  multi-tenant deployments, not on roadmap.
+
+---
+
 ## v0.1.3 — serve `netboot.xyz-snponly.efi` for x86_64 UEFI
 
 The v0.1.2 user reported that PXE-booting an AMI/Phoenix-firmware
