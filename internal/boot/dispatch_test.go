@@ -15,7 +15,10 @@ func dispatchCtx() DispatchContext {
 }
 
 func TestDispatch_EmptyFleet_DefaultArmOnly(t *testing.T) {
-	out := RenderDispatch(nil, dispatchCtx())
+	// v0.5.9 ships the diagnostic dispatch (probe-only). Production
+	// dispatch returns in v0.5.10. Asserting via the renamed
+	// production function so we don't lose coverage in the meantime.
+	out := renderDispatchProduction(nil, dispatchCtx())
 	s := string(out)
 	if !strings.HasPrefix(s, "#!ipxe") {
 		t.Errorf("missing shebang: %s", s)
@@ -50,7 +53,7 @@ machines:
 		t.Fatalf("Load: %v", err)
 	}
 
-	out := RenderDispatch(f, dispatchCtx())
+	out := renderDispatchProduction(f, dispatchCtx())
 	s := string(out)
 
 	for _, want := range []string{
@@ -129,7 +132,7 @@ machines:
 		t.Fatalf("Load: %v", err)
 	}
 
-	out := RenderDispatch(f, dispatchCtx())
+	out := renderDispatchProduction(f, dispatchCtx())
 	s := string(out)
 
 	cases := []struct{ name, want string }{

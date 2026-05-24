@@ -36,6 +36,37 @@ type DispatchContext struct {
 //   - A `sleep 3` precedes `shell` so the error message stays on
 //     screen on boards that clear on shell entry.
 func RenderDispatch(f *fleet.Fleet, ctx DispatchContext) []byte {
+	// v0.5.9: TEMPORARY DIAGNOSTIC. Eight releases of debugging have
+	// not produced a single phone-home probe hit in pxe-beacon's log,
+	// despite the matched arm seeming to fire its own dhcp. Replace
+	// the entire dispatch with a minimal probe-only script. If even
+	// THIS doesn't yield a probe hit, iPXE definitively is not
+	// executing our autoexec.ipxe — and we go after the TFTP transfer
+	// integrity / iPXE-rejection-of-our-content angle next.
+	//
+	// The real dispatch (fleet routing + kernel boot) returns in
+	// v0.5.10 once the diagnostic settles which class of bug we are
+	// hunting.
+	addr := fmt.Sprintf("%s:%d", ctx.AdvertisedIP, ctx.HTTPPort)
+	diagnostic := fmt.Sprintf(`#!ipxe
+echo PXE-BEACON DIAGNOSTIC v0.5.9
+echo -- if you can read this, iPXE IS running our autoexec.ipxe --
+chain --autofree tftp://%s/probe/pre-dhcp || echo TFTP_PRE_DHCP_FAILED
+dhcp || echo DHCP_COMMAND_FAILED
+chain --autofree tftp://%s/probe/post-dhcp || echo TFTP_POST_DHCP_FAILED
+chain --autofree http://%s/debug/probe/post-dhcp || echo HTTP_POST_DHCP_FAILED
+echo -- all probes attempted, sleeping 30s before reboot --
+sleep 30
+reboot
+`, ctx.AdvertisedIP, ctx.AdvertisedIP, addr)
+	_ = f
+	return []byte(diagnostic)
+}
+
+// renderDispatchProduction is the v0.5.0..v0.5.8 dispatch logic,
+// retained here so we can restore it in v0.5.10 once the v0.5.9
+// diagnostic settles the autoexec-is-or-is-not-running question.
+func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	var buf bytes.Buffer
 	w := func(s string) { buf.WriteString(s); buf.WriteByte('\n') }
 
