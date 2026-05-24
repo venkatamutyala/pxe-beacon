@@ -70,15 +70,23 @@ func New(o Options) (*Server, error) {
 
 // Serve listens until ctx is cancelled.
 func (s *Server) Serve(ctx context.Context) error {
-	addr, err := net.ResolveUDPAddr("udp", s.addr)
+	// v0.5.11: bind IPv4-only ("udp4"). The previous "udp" network
+	// gave an IPv6 dual-stack socket. macOS 26.4.1's default for
+	// net.inet6.ip6.v6only appears to be 1, so IPv4 packets from
+	// external clients (e.g. PXE clients on a different L3 subnet)
+	// don't reach the IPv6 socket. The Mac's own loopback curl works
+	// because that's a separate code path. Confirmed by venkat@'s
+	// iPXE-shell test: chain TFTP from PXE client timed out even
+	// though TFTP from loopback works.
+	addr, err := net.ResolveUDPAddr("udp4", s.addr)
 	if err != nil {
 		return fmt.Errorf("resolve tftp addr %q: %w", s.addr, err)
 	}
-	pc, err := net.ListenPacket("udp", addr.String())
+	pc, err := net.ListenPacket("udp4", addr.String())
 	if err != nil {
 		return fmt.Errorf("bind tftp %s: %w (hint: udp/69 needs root)", s.addr, err)
 	}
-	s.log.Infof("listening on %s", pc.LocalAddr())
+	s.log.Infof("listening on %s (udp4)", pc.LocalAddr())
 
 	done := make(chan error, 1)
 	go func() {

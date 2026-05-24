@@ -736,7 +736,14 @@ func statusDot(state string) string {
 
 // Serve binds and runs until ctx is cancelled.
 func (s *Server) Serve(ctx context.Context) error {
-	ln, err := net.Listen("tcp", s.opts.Listen)
+	// v0.5.11: bind IPv4-only ("tcp4") for the same reason TFTP does
+	// — macOS 26.4.1's IPv6 v6only=1 default means external IPv4
+	// clients (e.g. PXE clients on a different subnet) can't reach
+	// an IPv6 dual-stack socket. iPXE shell test on venkat@'s box
+	// confirmed: chain http://10.69.69.218:8080/... returned
+	// connection-reset, meaning the SYN arrived but the kernel had
+	// no IPv4 listener and sent RST.
+	ln, err := net.Listen("tcp4", s.opts.Listen)
 	if err != nil {
 		hint := ""
 		if strings.Contains(err.Error(), "address already in use") {

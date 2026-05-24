@@ -35,40 +35,12 @@ type DispatchContext struct {
 //     doesn't leave the operator at a context-less iPXE shell.
 //   - A `sleep 3` precedes `shell` so the error message stays on
 //     screen on boards that clear on shell entry.
+// RenderDispatch generates the per-MAC dispatch autoexec.ipxe script.
+// v0.5.11 restores the production dispatch after v0.5.9/v0.5.10's
+// diagnostics confirmed iPXE can both run our script AND reach
+// pxe-beacon via the IPv4-bound listeners.
 func RenderDispatch(f *fleet.Fleet, ctx DispatchContext) []byte {
-	// v0.5.9: TEMPORARY DIAGNOSTIC. Eight releases of debugging have
-	// not produced a single phone-home probe hit in pxe-beacon's log,
-	// despite the matched arm seeming to fire its own dhcp. Replace
-	// the entire dispatch with a minimal probe-only script. If even
-	// THIS doesn't yield a probe hit, iPXE definitively is not
-	// executing our autoexec.ipxe — and we go after the TFTP transfer
-	// integrity / iPXE-rejection-of-our-content angle next.
-	//
-	// The real dispatch (fleet routing + kernel boot) returns in
-	// v0.5.10 once the diagnostic settles which class of bug we are
-	// hunting.
-	addr := fmt.Sprintf("%s:%d", ctx.AdvertisedIP, ctx.HTTPPort)
-	// v0.5.10 diagnostic: multiple iPXE primitives across both
-	// protocols. TFTP filenames have no slashes (some TFTP path
-	// handlers reject "/"). Each probe is a distinct filename so we
-	// can tell exactly which primitive worked.
-	diagnostic := fmt.Sprintf(`#!ipxe
-echo PXE-BEACON DIAGNOSTIC v0.5.10
-echo -- if you can read this, iPXE IS running our autoexec.ipxe --
-imgfetch tftp://%s/probe-imgfetch-pre noop1 || echo IMGFETCH_TFTP_PRE_FAILED
-chain --autofree tftp://%s/probe-chain-pre || echo CHAIN_TFTP_PRE_FAILED
-dhcp || echo DHCP_COMMAND_FAILED
-echo -- post-dhcp ip=${ip} gw=${gateway} dns=${dns} --
-imgfetch tftp://%s/probe-imgfetch-post noop2 || echo IMGFETCH_TFTP_POST_FAILED
-chain --autofree tftp://%s/probe-chain-post || echo CHAIN_TFTP_POST_FAILED
-imgfetch http://%s/debug/probe/imgfetch-http noop3 || echo IMGFETCH_HTTP_FAILED
-chain --autofree http://%s/debug/probe/chain-http || echo CHAIN_HTTP_FAILED
-echo -- all probes attempted; sleeping 30s before reboot --
-sleep 30
-reboot
-`, ctx.AdvertisedIP, ctx.AdvertisedIP, ctx.AdvertisedIP, ctx.AdvertisedIP, addr, addr)
-	_ = f
-	return []byte(diagnostic)
+	return renderDispatchProduction(f, ctx)
 }
 
 // renderDispatchProduction is the v0.5.0..v0.5.8 dispatch logic,
