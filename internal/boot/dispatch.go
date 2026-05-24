@@ -67,7 +67,7 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("# the boot story unfold.")
 	w("")
 	w("echo ============================================================")
-	w("echo  pxe-beacon dispatch (v0.6.14) — embedded preseed mirrors a known-good real-world preseed")
+	w("echo  pxe-beacon dispatch (v0.6.15) — no kernel ip= (let d-i's netcfg handle network)")
 	w("echo ============================================================")
 	w("echo")
 	w("echo [stage 0/5] iPXE settings BEFORE dhcp")
@@ -246,23 +246,25 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	// values are the ones iPXE actually resolved at boot. autoconf
 	// is `none` (static), so the kernel doesn't re-DHCP and we keep
 	// the widened netmask.
-	// v0.6.13: just use ip=dhcp.
+	// v0.6.15: drop the kernel `ip=` cmdline entirely. Let d-i's own
+	// netcfg do all network setup.
 	//
-	// History: v0.6.0-v0.6.12 tried `ip=${net0/ip}::${net0/gateway}:%s:::none`
-	// to statically configure the interface with a widened netmask
-	// at the kernel level. That cmdline string IS correctly emitted
-	// (verified by user dump of /proc/cmdline) but klibc-ipconfig
-	// on Debian-12 d-i isn't acting on it — interface stays DOWN.
-	// The user also confirmed `udhcpc -i eno1` brings the link up
-	// fine with DHCP. So we let DHCP do the bring-up.
+	// History:
+	//   v0.6.0-v0.6.12: `ip=...:::none` static config. klibc-ipconfig
+	//     didn't act on it. Link stayed DOWN.
+	//   v0.6.13-v0.6.14: `ip=dhcp`. klibc-ipconfig DOES try DHCP but
+	//     evidently times out before the eno1 driver has negotiated
+	//     link. User reported "still doesn't bring up a link."
+	//   v0.6.15 (here): no `ip=` at all. d-i's netcfg runs AFTER
+	//     hw-detect (drivers loaded, link up), with its own dhclient
+	//     and proper timeouts. BOOTIF still tells netcfg which NIC
+	//     to use, so it picks eno1 instead of the WiFi adapter.
 	//
-	// Trade-off: d-i now has the broken /24 netmask the DHCP server
-	// hands out, so HTTP fetches from pxe-beacon's cross-/24 IP
-	// can't be guaranteed. Will see in the wild whether the user's
-	// gateway routes between the /24s for TCP. If not, v0.6.14 will
-	// add a TFTP-served preseed path (TFTP works cross-/24 on this
-	// network — confirmed by firmware-stage TFTP working).
-	ipArg := "ip=dhcp"
+	// Note: with no kernel-level network, the URL fetch for preseed
+	// happens via d-i's network stack (netcfg-already-ran). That's
+	// the normal Debian PXE install path — exactly what the user's
+	// known-good reference preseed assumes.
+	ipArg := ""
 	_ = ctx.ClientNetmask // late_command in preseed still uses this
 
 	w("")
