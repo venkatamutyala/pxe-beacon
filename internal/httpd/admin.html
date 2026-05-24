@@ -63,8 +63,8 @@
 
 <h2>fleet machines</h2>
 <p class="mac">
-  Machines are <strong>idle</strong> by default — pxe-beacon ignores their PXE DHCP requests and they fall through to local-disk boot. Click <strong>Deploy</strong> to queue an OS install on next power-on (auto-expires in {{.PendingTTL}}). Cloud-init phone-home auto-cancels. <em>Rescue</em> mode is reserved for a future release.
-  <br>API: <code>POST /api/v1/machines/&lt;mac&gt;/deploy</code> · <code>POST /api/v1/machines/&lt;mac&gt;/rescue</code> · <code>POST /api/v1/machines/&lt;mac&gt;/cancel</code> · <code>GET /api/v1/machines</code>
+  Machines are <strong>idle</strong> by default — pxe-beacon ignores their PXE DHCP requests and they fall through to local-disk boot. Click <strong>install</strong> to queue an OS install on next power-on (auto-expires in {{.PendingTTL}}). Cloud-init phone-home auto-cancels. <em>rescue</em> mode is reserved for a future release.
+  <br>API: <code>PUT /api/v1/machines/&lt;mac&gt;/intent {"action":"install"|"rescue"|null}</code> · <code>GET /api/v1/machines</code>
 </p>
 <table>
   <thead>
@@ -78,9 +78,9 @@
       <td>{{.Profile.Boot}}</td>
       <td class="pending-cell">
         <span class="pending-state idle">idle</span>
-        <button type="button" class="deploy" data-action="deploy">deploy</button>
-        <button type="button" class="rescue" data-action="rescue" title="reserved for a future release">rescue</button>
-        <button type="button" class="cancel" data-action="cancel" style="display:none">cancel</button>
+        <button type="button" class="deploy" data-intent="install">install</button>
+        <button type="button" class="rescue" data-intent="rescue" title="reserved for a future release">rescue</button>
+        <button type="button" class="cancel" data-intent="" style="display:none">cancel</button>
       </td>
       <td>{{if .Profile.Preseed}}{{.Profile.Preseed}}{{else}}<span class="mac">(default)</span>{{end}}</td>
       <td>{{if .Profile.CloudInit}}{{.Profile.CloudInit}}{{else}}<span class="mac">(default)</span>{{end}}</td>
@@ -99,17 +99,20 @@
   </tbody>
 </table>
 <script>
+// v0.8.0: K8s-style PUT /intent. One mutation, one endpoint, parameterized
+// by the desired action.
 function renderPending(row, view) {
   const cell = row.querySelector('.pending-cell');
   const state = cell.querySelector('.pending-state');
-  const deployBtn = cell.querySelector('button.deploy');
+  const installBtn = cell.querySelector('button.deploy');
   const rescueBtn = cell.querySelector('button.rescue');
   const cancelBtn = cell.querySelector('button.cancel');
-  const action = view && view.pending_action;
+  const desired = view && view.desired || {};
+  const action = desired.action;
   if (action) {
     let label = action;
-    if (view.expires_at) {
-      const ms = new Date(view.expires_at) - new Date();
+    if (desired.expires_at) {
+      const ms = new Date(desired.expires_at) - new Date();
       if (ms > 0) {
         const m = Math.floor(ms / 60000);
         const s = Math.floor((ms % 60000) / 1000);
@@ -120,13 +123,13 @@ function renderPending(row, view) {
     }
     state.textContent = label;
     state.className = 'pending-state ' + action;
-    deployBtn.style.display = 'none';
+    installBtn.style.display = 'none';
     rescueBtn.style.display = 'none';
     cancelBtn.style.display = '';
   } else {
     state.textContent = 'idle';
     state.className = 'pending-state idle';
-    deployBtn.style.display = '';
+    installBtn.style.display = '';
     rescueBtn.style.display = '';
     cancelBtn.style.display = 'none';
   }
@@ -143,19 +146,24 @@ async function refreshPendingRows() {
     });
   } catch (_) {}
 }
-document.querySelectorAll('tr[data-mac] button[data-action]').forEach(btn => {
+document.querySelectorAll('tr[data-mac] button[data-intent]').forEach(btn => {
   btn.addEventListener('click', async () => {
     const row = btn.closest('tr[data-mac]');
     const mac = row.dataset.mac;
-    const action = btn.dataset.action;
+    const intent = btn.dataset.intent;
+    const body = JSON.stringify({action: intent === '' ? null : intent});
     btn.disabled = true;
     try {
-      const res = await fetch('/api/v1/machines/' + encodeURIComponent(mac) + '/' + action, {method: 'POST'});
+      const res = await fetch('/api/v1/machines/' + encodeURIComponent(mac) + '/intent', {
+        method: 'PUT',
+        headers: {'content-type': 'application/json'},
+        body,
+      });
       if (res.ok) {
         renderPending(row, await res.json());
       } else {
         const err = await res.json().catch(() => ({error: res.statusText}));
-        alert(action + ' failed: ' + (err.error || res.statusText));
+        alert((intent || 'cancel') + ' failed: ' + (err.error || res.statusText));
       }
     } finally {
       btn.disabled = false;

@@ -51,127 +51,192 @@ machines:
 	return srv, pSt, fl
 }
 
-func doLoopbackReq(srv *Server, method, target string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(method, target, nil)
+// doLoopback issues a request on the loopback interface so loopbackOnly
+// admits it. body may be nil.
+func doLoopback(srv *Server, method, target, body string) *httptest.ResponseRecorder {
+	var req *http.Request
+	if body == "" {
+		req = httptest.NewRequest(method, target, nil)
+	} else {
+		req = httptest.NewRequest(method, target, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.RemoteAddr = "127.0.0.1:54321"
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 	return w
 }
 
-func TestAPI_DeployCancelRoundTrip(t *testing.T) {
+// decode parses w.Body into v, failing the test on error.
+func decode(t *testing.T, w *httptest.ResponseRecorder, v any) {
+	t.Helper()
+	if err := json.Unmarshal(w.Body.Bytes(), v); err != nil {
+		t.Fatalf("decode body: %v body=%s", err, w.Body.String())
+	}
+}
+
+func TestAPI_SetIntent_Install(t *testing.T) {
 	srv, pSt, _ := newAPIServer(t)
 	mac := "58:47:ca:70:c7:c9"
 
-	if pSt.IsPending(mac) {
-		t.Fatal("fresh state: should be idle")
-	}
-
-	// Deploy via API.
-	w := doLoopbackReq(srv, "POST", "/api/v1/machines/"+mac+"/deploy")
+	w := doLoopback(srv, "PUT", "/api/v1/machines/"+mac+"/intent", `{"action":"install"}`)
 	if w.Code != 200 {
-		t.Fatalf("deploy: status %d, body=%s", w.Code, w.Body.String())
+		t.Fatalf("PUT install: status %d body=%s", w.Code, w.Body.String())
 	}
-	var view machineAPIView
-	if err := json.Unmarshal(w.Body.Bytes(), &view); err != nil {
-		t.Fatalf("decode deploy body: %v body=%s", err, w.Body.String())
+	var view intentView
+	decode(t, w, &view)
+	if view.Desired.Action != "install" {
+		t.Fatalf("want desired.action=install, got %+v", view)
 	}
-	if view.PendingAction != "deploy" {
-		t.Fatalf("deploy response should have pending_action='deploy', got %+v", view)
-	}
-	if view.Name != "venkat-1" || view.Boot != "debian-12" {
-		t.Errorf("deploy response missing fleet fields: %+v", view)
+	if view.MAC != mac {
+		t.Errorf("want mac=%s, got %s", mac, view.MAC)
 	}
 	if !pSt.IsPending(mac) {
-		t.Fatal("Store should be pending after API call")
-	}
-
-	// Cancel via API. Use a fresh view because the omitempty tag on
-	// pending_action means the cancel response omits the field, and
-	// json.Unmarshal won't clear what's already there.
-	w = doLoopbackReq(srv, "POST", "/api/v1/machines/"+mac+"/cancel")
-	if w.Code != 200 {
-		t.Fatalf("cancel: status %d, body=%s", w.Code, w.Body.String())
-	}
-	view = machineAPIView{}
-	if err := json.Unmarshal(w.Body.Bytes(), &view); err != nil {
-		t.Fatalf("decode cancel body: %v", err)
-	}
-	if view.PendingAction != "" {
-		t.Fatalf("cancel response should have empty pending_action, got %+v", view)
-	}
-	if pSt.IsPending(mac) {
-		t.Fatal("Store should be idle after Cancel API call")
+		t.Fatal("Store should be pending")
 	}
 }
 
-func TestAPI_Rescue_Returns501(t *testing.T) {
+func TestAPI_SetIntent_Rescue(t *testing.T) {
 	srv, pSt, _ := newAPIServer(t)
 	mac := "58:47:ca:70:c7:c9"
 
-	w := doLoopbackReq(srv, "POST", "/api/v1/machines/"+mac+"/rescue")
-	if w.Code != http.StatusNotImplemented {
-		t.Fatalf("rescue: want 501, got %d body=%s", w.Code, w.Body.String())
+	w := doLoopback(srv, "PUT", "/api/v1/machines/"+mac+"/intent", `{"action":"rescue"}`)
+	if w.Code != 200 {
+		t.Fatalf("PUT rescue: status %d body=%s", w.Code, w.Body.String())
 	}
-	// Rescue stub must NOT queue an action.
-	if pSt.IsPending(mac) {
-		t.Fatal("rescue 501 stub should NOT have queued an action")
+	var view intentView
+	decode(t, w, &view)
+	if view.Desired.Action != "rescue" {
+		t.Fatalf("want desired.action=rescue, got %+v", view)
+	}
+	if !pSt.IsPending(mac) {
+		t.Fatal("Store should be pending")
 	}
 }
 
-func TestAPI_DeployUnknownMAC_404(t *testing.T) {
+func TestAPI_SetIntent_Null_Clears(t *testing.T) {
+	srv, pSt, _ := newAPIServer(t)
+	mac := "58:47:ca:70:c7:c9"
+	if _, err := pSt.Install(mac); err != nil {
+		t.Fatal(err)
+	}
+	w := doLoopback(srv, "PUT", "/api/v1/machines/"+mac+"/intent", `{"action":null}`)
+	if w.Code != 200 {
+		t.Fatalf("PUT null: status %d body=%s", w.Code, w.Body.String())
+	}
+	var view intentView
+	decode(t, w, &view)
+	if view.Desired.Action != "" {
+		t.Fatalf("want desired.action='', got %+v", view)
+	}
+	if pSt.IsPending(mac) {
+		t.Fatal("Store should be cleared")
+	}
+}
+
+func TestAPI_SetIntent_Idempotent(t *testing.T) {
+	srv, pSt, _ := newAPIServer(t)
+	mac := "58:47:ca:70:c7:c9"
+	body := `{"action":"install"}`
+
+	// Same body twice — should converge to same state.
+	w1 := doLoopback(srv, "PUT", "/api/v1/machines/"+mac+"/intent", body)
+	if w1.Code != 200 {
+		t.Fatalf("first PUT: status %d", w1.Code)
+	}
+	w2 := doLoopback(srv, "PUT", "/api/v1/machines/"+mac+"/intent", body)
+	if w2.Code != 200 {
+		t.Fatalf("second PUT: status %d", w2.Code)
+	}
+	if !pSt.IsPending(mac) {
+		t.Fatal("Store should be pending after idempotent calls")
+	}
+}
+
+func TestAPI_SetIntent_UnknownMAC_404(t *testing.T) {
 	srv, _, _ := newAPIServer(t)
-	w := doLoopbackReq(srv, "POST", "/api/v1/machines/aa:bb:cc:dd:ee:ff/deploy")
+	w := doLoopback(srv, "PUT", "/api/v1/machines/aa:bb:cc:dd:ee:ff/intent", `{"action":"install"}`)
 	if w.Code != 404 {
-		t.Fatalf("unknown MAC deploy: want 404, got %d body=%s", w.Code, w.Body.String())
+		t.Fatalf("unknown MAC: want 404, got %d body=%s", w.Code, w.Body.String())
 	}
 	var errView apiErrorView
-	if err := json.Unmarshal(w.Body.Bytes(), &errView); err != nil {
-		t.Fatalf("decode error body: %v", err)
-	}
+	decode(t, w, &errView)
 	if !strings.Contains(errView.Error, "not in fleet") {
 		t.Errorf("error msg missing 'not in fleet': %q", errView.Error)
 	}
 }
 
-func TestAPI_BadMACFormat_400(t *testing.T) {
+func TestAPI_SetIntent_InvalidAction_400(t *testing.T) {
 	srv, _, _ := newAPIServer(t)
-	w := doLoopbackReq(srv, "POST", "/api/v1/machines/not-a-mac/deploy")
+	mac := "58:47:ca:70:c7:c9"
+	w := doLoopback(srv, "PUT", "/api/v1/machines/"+mac+"/intent", `{"action":"reformat-the-universe"}`)
 	if w.Code != 400 {
-		t.Fatalf("bad MAC: want 400, got %d", w.Code)
+		t.Fatalf("bad action: want 400, got %d body=%s", w.Code, w.Body.String())
 	}
 }
 
-func TestAPI_GetMachine(t *testing.T) {
+func TestAPI_SetIntent_MissingAction_400(t *testing.T) {
+	// Body without an "action" key. We require explicit intent even if null.
+	srv, _, _ := newAPIServer(t)
+	mac := "58:47:ca:70:c7:c9"
+	w := doLoopback(srv, "PUT", "/api/v1/machines/"+mac+"/intent", `{}`)
+	if w.Code != 400 {
+		t.Fatalf("missing action: want 400, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestAPI_GetIntent(t *testing.T) {
 	srv, pSt, _ := newAPIServer(t)
 	mac := "58:47:ca:70:c7:c9"
 
-	w := doLoopbackReq(srv, "GET", "/api/v1/machines/"+mac)
+	// idle
+	w := doLoopback(srv, "GET", "/api/v1/machines/"+mac+"/intent", "")
 	if w.Code != 200 {
-		t.Fatalf("get: status %d", w.Code)
+		t.Fatalf("get idle: status %d", w.Code)
 	}
-	var view machineAPIView
-	_ = json.Unmarshal(w.Body.Bytes(), &view)
-	if view.PendingAction != "" {
-		t.Errorf("idle GET should report empty pending_action, got %+v", view)
+	var view intentView
+	decode(t, w, &view)
+	if view.Desired.Action != "" {
+		t.Errorf("idle GET should report empty desired.action, got %+v", view)
 	}
 
-	if _, err := pSt.Deploy(mac); err != nil {
+	// after Install
+	if _, err := pSt.Install(mac); err != nil {
 		t.Fatal(err)
 	}
-	w = doLoopbackReq(srv, "GET", "/api/v1/machines/"+mac)
-	view = machineAPIView{}
-	_ = json.Unmarshal(w.Body.Bytes(), &view)
-	if view.PendingAction != "deploy" {
-		t.Errorf("deploy-pending GET should report pending_action='deploy', got %+v", view)
+	w = doLoopback(srv, "GET", "/api/v1/machines/"+mac+"/intent", "")
+	view = intentView{}
+	decode(t, w, &view)
+	if view.Desired.Action != "install" {
+		t.Errorf("install GET should report action=install, got %+v", view)
+	}
+}
+
+func TestAPI_GetMachine_HasDesiredAndObserved(t *testing.T) {
+	srv, pSt, _ := newAPIServer(t)
+	mac := "58:47:ca:70:c7:c9"
+	if _, err := pSt.Install(mac); err != nil {
+		t.Fatal(err)
+	}
+	w := doLoopback(srv, "GET", "/api/v1/machines/"+mac, "")
+	if w.Code != 200 {
+		t.Fatalf("get machine: status %d", w.Code)
+	}
+	var view machineAPIView
+	decode(t, w, &view)
+	if view.Name != "venkat-1" || view.Boot != "debian-12" {
+		t.Errorf("missing fleet fields: %+v", view)
+	}
+	if view.Desired.Action != "install" {
+		t.Errorf("missing desired.action: %+v", view)
 	}
 }
 
 func TestAPI_List(t *testing.T) {
 	srv, pSt, _ := newAPIServer(t)
-	_, _ = pSt.Deploy("58:47:ca:70:c7:c9")
+	_, _ = pSt.Install("58:47:ca:70:c7:c9")
 
-	w := doLoopbackReq(srv, "GET", "/api/v1/machines")
+	w := doLoopback(srv, "GET", "/api/v1/machines", "")
 	if w.Code != 200 {
 		t.Fatalf("list: status %d", w.Code)
 	}
@@ -179,14 +244,12 @@ func TestAPI_List(t *testing.T) {
 		PendingTTLs int              `json:"pending_ttl_s"`
 		Machines    []machineAPIView `json:"machines"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode list: %v body=%s", err, w.Body.String())
-	}
+	decode(t, w, &resp)
 	if len(resp.Machines) != 1 {
 		t.Fatalf("want 1 machine, got %d", len(resp.Machines))
 	}
-	if resp.Machines[0].PendingAction != "deploy" {
-		t.Errorf("expected pending_action='deploy' in list, got %+v", resp.Machines[0])
+	if resp.Machines[0].Desired.Action != "install" {
+		t.Errorf("expected desired.action=install in list, got %+v", resp.Machines[0])
 	}
 	if resp.PendingTTLs != int((15 * time.Minute).Seconds()) {
 		t.Errorf("pending_ttl_s wrong: got %d", resp.PendingTTLs)
@@ -195,7 +258,9 @@ func TestAPI_List(t *testing.T) {
 
 func TestAPI_NonLoopback_403(t *testing.T) {
 	srv, _, _ := newAPIServer(t)
-	req := httptest.NewRequest("POST", "/api/v1/machines/58:47:ca:70:c7:c9/deploy", nil)
+	req := httptest.NewRequest("PUT", "/api/v1/machines/58:47:ca:70:c7:c9/intent",
+		strings.NewReader(`{"action":"install"}`))
+	req.Header.Set("Content-Type", "application/json")
 	req.RemoteAddr = "10.69.7.55:54321"
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
@@ -207,7 +272,7 @@ func TestAPI_NonLoopback_403(t *testing.T) {
 func TestAPI_InstallerDone_AutoCancels(t *testing.T) {
 	srv, pSt, _ := newAPIServer(t)
 	mac := "58:47:ca:70:c7:c9"
-	if _, err := pSt.Deploy(mac); err != nil {
+	if _, err := pSt.Install(mac); err != nil {
 		t.Fatal(err)
 	}
 	if !pSt.IsPending(mac) {
@@ -221,6 +286,6 @@ func TestAPI_InstallerDone_AutoCancels(t *testing.T) {
 		t.Fatalf("done: status %d body=%s", w.Code, w.Body.String())
 	}
 	if pSt.IsPending(mac) {
-		t.Fatal("phone_home should have cancelled the pending action")
+		t.Fatal("phone_home should have cancelled")
 	}
 }

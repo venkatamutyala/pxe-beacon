@@ -1,21 +1,16 @@
-// Package pending tracks per-machine pending actions for pxe-beacon.
+// Package pending tracks per-machine pending boot intent for pxe-beacon.
 //
-// An operator queues an action against a MAC via the REST API:
-//   - POST /api/v1/machines/{mac}/deploy  → Action == ActionDeploy
-//   - POST /api/v1/machines/{mac}/rescue  → Action == ActionRescue (v0.7.1 stub)
-//   - POST /api/v1/machines/{mac}/cancel  → clears any pending action
+// v0.8.0 K8s-style API: operators set the desired action via PUT to
+//   /api/v1/machines/{mac}/intent with body {"action": "install"|"rescue"|null}.
+// Internally that maps to Install / Rescue / Cancel on Store.
 //
-// proxyDHCP consults IsPending(mac) before responding: no pending action,
-// no OFFER, and the client falls through to local-disk boot.
+// proxyDHCP consults IsPending(mac) before responding: no pending
+// action, no OFFER, and the client falls through to local-disk boot.
 //
-// Storage is in-memory only — restart clears every pending action. That
-// matches the v0.7.0 design rationale: a forgotten action can't survive
-// a power blip and accidentally reinstall a box days later. The TTL
-// (default 15 min) is a second layer of the same protection.
-//
-// The naming follows MaaS's verb model: `deploy` and `rescue` are
-// peer actions, `cancel` is the universal antonym. See PROGRESS for
-// the v0.7.1 TPM review that landed on this vocabulary.
+// Storage is in-memory only — restart clears every pending action.
+// A forgotten action can't survive a power blip and accidentally
+// reinstall a box days later. The TTL (default 15 min) is a second
+// layer of the same protection.
 package pending
 
 import (
@@ -27,11 +22,14 @@ import (
 
 // Action names the kind of operation queued against a machine. Stable
 // strings — they appear in JSON, log lines, and the admin UI.
+//
+// v0.8.0 renamed ActionDeploy to ActionInstall to match the HTTP
+// vocabulary (PUT /intent {"action": "install"}).
 type Action string
 
 const (
-	ActionDeploy Action = "deploy"
-	ActionRescue Action = "rescue"
+	ActionInstall Action = "install"
+	ActionRescue  Action = "rescue"
 )
 
 // entry is the stored value: which action was queued and when.
@@ -59,13 +57,15 @@ func New(ttl time.Duration) *Store {
 	}
 }
 
-// Deploy queues a deploy action for mac. Re-queueing resets the timer.
+// Install queues an install action for mac. Re-queueing resets the timer.
 // Returns the resulting expiry time (zero when ttl <= 0).
-func (s *Store) Deploy(mac string) (time.Time, error) {
-	return s.queue(mac, ActionDeploy)
+//
+// v0.8.0: renamed from Deploy to match the HTTP vocabulary.
+func (s *Store) Install(mac string) (time.Time, error) {
+	return s.queue(mac, ActionInstall)
 }
 
-// Rescue queues a rescue action for mac. Same semantics as Deploy.
+// Rescue queues a rescue action for mac. Same semantics as Install.
 func (s *Store) Rescue(mac string) (time.Time, error) {
 	return s.queue(mac, ActionRescue)
 }

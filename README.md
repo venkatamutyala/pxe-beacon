@@ -226,39 +226,59 @@ curl http://127.0.0.1:8080/autoinstall/58-47-ca-70-c7-c9/user-data
 **Live config reload:** edit `fleet.yaml`, then `kill -HUP $(pgrep -x pxe-beacon)`.
 No restart needed — the next OFFER picks up the new config.
 
-### Queueing a deploy / rescue (v0.7.1+)
+### Boot intent (v0.8.0+)
 
 Machines in `fleet.yaml` are **idle by default** — pxe-beacon ignores
 their PXE DHCP requests and the box falls through to its local-disk
-boot. To install (or re-install) the OS, queue a `deploy`:
+boot. To install (or re-install) the OS, set the desired action via
+the K8s-style `intent` resource:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/api/v1/machines/58:47:ca:70:c7:c9/deploy
-# {"mac":"58:47:ca:70:c7:c9","name":"venkat-1","boot":"debian-12",
-#  "pending_action":"deploy","requested_at":"...","expires_at":"...","state":""}
+curl -X PUT http://127.0.0.1:8080/api/v1/machines/58:47:ca:70:c7:c9/intent \
+  -H 'content-type: application/json' \
+  -d '{"action":"install"}'
+# {
+#   "mac": "58:47:ca:70:c7:c9",
+#   "desired": {"action":"install", "requested_at":"...", "expires_at":"..."},
+#   "observed": {"phase":"", "last_seen":"0001-01-01T00:00:00Z"}
+# }
 ```
 
-The queued action auto-expires after `-pending-ttl` (default `15m`)
+The action is idempotent — same body produces the same state.
+Cancel by PUT'ing `null`:
+
+```bash
+curl -X PUT http://127.0.0.1:8080/api/v1/machines/58:47:ca:70:c7:c9/intent \
+  -H 'content-type: application/json' -d '{"action":null}'
+```
+
+The pending action auto-expires after `-pending-ttl` (default `15m`)
 and is auto-cancelled when cloud-init phones home on first boot.
 Restart of pxe-beacon also clears every queued action. The `/admin`
-UI has per-row Deploy / Rescue / Cancel buttons that hit the same
-endpoints.
+UI has per-row install / rescue / cancel buttons that PUT the same
+endpoint with the matching body.
 
 Full REST surface (loopback-only, no auth — same security model as
 `/admin`):
 
 | method | path | what |
 |---|---|---|
-| `POST` | `/api/v1/machines/{mac}/deploy` | queue an OS install on next PXE boot |
-| `POST` | `/api/v1/machines/{mac}/rescue` | queue rescue mode (v0.7.1: returns 501 — wiring lands in a later release) |
-| `POST` | `/api/v1/machines/{mac}/cancel` | clear whatever's queued |
-| `GET`  | `/api/v1/machines/{mac}` | per-machine pending + state |
-| `GET`  | `/api/v1/machines` | all fleet machines with pending state |
+| `PUT`  | `/api/v1/machines/{mac}/intent` | set desired action (`install`, `rescue`, or `null`) |
+| `GET`  | `/api/v1/machines/{mac}/intent` | read desired + observed |
+| `GET`  | `/api/v1/machines/{mac}` | full per-machine view (fleet config + desired + observed) |
+| `GET`  | `/api/v1/machines` | all fleet machines |
 
-Vocabulary borrowed from MaaS: `deploy` for OS install (peer of
-`rescue`), `cancel` for the universal antonym. Unknown MACs (not in
-`fleet.yaml`) cannot be queued and keep their netboot.xyz fallback —
-so booting a random box doesn't require any prior queueing.
+K8s-style declarative shape was picked over POST-verbs and Hetzner's
+per-feature subtrees for tool-friendliness — PUT is idempotent so
+Terraform / Ansible / React Query map cleanly to it. Unknown MACs
+(not in `fleet.yaml`) cannot have intent set and keep their
+netboot.xyz fallback, so booting a random box doesn't require any
+prior queueing.
+
+**Note:** rescue is a placeholder for now — the API accepts `action:
+"rescue"` and queues it, but there is no rescue boot target wired
+into the dispatch script yet (lands in v0.8.1). Power-cycle / BMC
+support also v0.8.1.
 
 **Cloud-init phone_home:** the example user-data files include a
 `phone_home` block that tells cloud-init to POST to pxe-beacon when

@@ -14,26 +14,26 @@ func newWithClock(ttl time.Duration, now *time.Time) *Store {
 	return s
 }
 
-func TestDeploy_ThenIsPending(t *testing.T) {
+func TestInstall_ThenIsPending(t *testing.T) {
 	now := time.Now()
 	s := newWithClock(15*time.Minute, &now)
 
 	if s.IsPending(testMAC) {
 		t.Fatal("fresh Store: IsPending should be false")
 	}
-	exp, err := s.Deploy(testMAC)
+	exp, err := s.Install(testMAC)
 	if err != nil {
-		t.Fatalf("Deploy: %v", err)
+		t.Fatalf("Install: %v", err)
 	}
 	if exp.IsZero() {
 		t.Fatal("expected non-zero expiry with positive ttl")
 	}
 	if !s.IsPending(testMAC) {
-		t.Fatal("after Deploy: IsPending should be true")
+		t.Fatal("after Install: IsPending should be true")
 	}
 	a, _, _, ok := s.Status(testMAC)
-	if !ok || a != ActionDeploy {
-		t.Fatalf("Status after Deploy: action=%v ok=%v", a, ok)
+	if !ok || a != ActionInstall {
+		t.Fatalf("Status after Install: action=%v ok=%v", a, ok)
 	}
 }
 
@@ -53,7 +53,7 @@ func TestRescue_ThenIsPending(t *testing.T) {
 func TestExpiryLapse(t *testing.T) {
 	now := time.Now()
 	s := newWithClock(15*time.Minute, &now)
-	if _, err := s.Deploy(testMAC); err != nil {
+	if _, err := s.Install(testMAC); err != nil {
 		t.Fatal(err)
 	}
 	// One second before expiry — still pending.
@@ -75,7 +75,7 @@ func TestCancel(t *testing.T) {
 	if s.Cancel(testMAC) {
 		t.Fatal("Cancel on empty: should return false")
 	}
-	if _, err := s.Deploy(testMAC); err != nil {
+	if _, err := s.Install(testMAC); err != nil {
 		t.Fatal(err)
 	}
 	if !s.Cancel(testMAC) {
@@ -86,28 +86,28 @@ func TestCancel(t *testing.T) {
 	}
 }
 
-func TestDeploy_ResetsTimer(t *testing.T) {
+func TestInstall_ResetsTimer(t *testing.T) {
 	now := time.Now()
 	s := newWithClock(15*time.Minute, &now)
 
-	if _, err := s.Deploy(testMAC); err != nil {
+	if _, err := s.Install(testMAC); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(15*time.Minute - time.Second)
-	if _, err := s.Deploy(testMAC); err != nil {
+	if _, err := s.Install(testMAC); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(15*time.Minute - time.Second)
 	if !s.IsPending(testMAC) {
-		t.Fatal("re-Deploy should reset the timer")
+		t.Fatal("re-Install should reset the timer")
 	}
 }
 
-func TestActionSwap_RescueOverridesDeploy(t *testing.T) {
-	// Issuing Rescue after Deploy replaces the pending action (no
+func TestActionSwap_RescueOverridesInstall(t *testing.T) {
+	// Issuing Rescue after Install replaces the pending action (no
 	// queue of multiple actions per MAC; "last writer wins").
 	s := New(15 * time.Minute)
-	if _, err := s.Deploy(testMAC); err != nil {
+	if _, err := s.Install(testMAC); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Rescue(testMAC); err != nil {
@@ -115,14 +115,14 @@ func TestActionSwap_RescueOverridesDeploy(t *testing.T) {
 	}
 	a, _, _, ok := s.Status(testMAC)
 	if !ok || a != ActionRescue {
-		t.Fatalf("expected Rescue to override Deploy, got %v ok=%v", a, ok)
+		t.Fatalf("expected Rescue to override Install, got %v ok=%v", a, ok)
 	}
 }
 
 func TestNoExpiry(t *testing.T) {
 	now := time.Now()
 	s := newWithClock(0, &now)
-	if _, err := s.Deploy(testMAC); err != nil {
+	if _, err := s.Install(testMAC); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(365 * 24 * time.Hour)
@@ -133,8 +133,8 @@ func TestNoExpiry(t *testing.T) {
 
 func TestInvalidMAC(t *testing.T) {
 	s := New(15 * time.Minute)
-	if _, err := s.Deploy("not a mac"); err == nil {
-		t.Fatal("Deploy of invalid MAC should error")
+	if _, err := s.Install("not a mac"); err == nil {
+		t.Fatal("Install of invalid MAC should error")
 	}
 	if _, err := s.Rescue("not a mac"); err == nil {
 		t.Fatal("Rescue of invalid MAC should error")
@@ -149,7 +149,7 @@ func TestInvalidMAC(t *testing.T) {
 
 func TestMACCanonicalization(t *testing.T) {
 	s := New(15 * time.Minute)
-	if _, err := s.Deploy("58-47-CA-70-C7-C9"); err != nil {
+	if _, err := s.Install("58-47-CA-70-C7-C9"); err != nil {
 		t.Fatal(err)
 	}
 	if !s.IsPending("58:47:ca:70:c7:c9") {
@@ -172,7 +172,7 @@ func TestConcurrency(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		for _, m := range macs {
 			wg.Add(3)
-			go func(mac string) { defer wg.Done(); _, _ = s.Deploy(mac) }(m)
+			go func(mac string) { defer wg.Done(); _, _ = s.Install(mac) }(m)
 			go func(mac string) { defer wg.Done(); _, _ = s.Rescue(mac) }(m)
 			go func(mac string) {
 				defer wg.Done()

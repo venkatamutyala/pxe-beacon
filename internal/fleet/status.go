@@ -38,12 +38,12 @@ type Status struct {
 	Stalled  bool      `json:"stalled,omitempty"`
 	Events   []Event   `json:"events,omitempty"`
 
-	// Pending-action fields (v0.7.1+). Populated by the httpd snapshot
-	// handler from the pending package; fleet itself does not import
-	// pending to avoid a dependency cycle.
+	// Desired-action fields (v0.8.0+, K8s-style). Populated by the
+	// httpd snapshot handler from the pending package; fleet itself
+	// does not import pending to avoid a dependency cycle.
 	//
-	// PendingAction is "deploy" / "rescue" / "" (none).
-	PendingAction string    `json:"pending_action,omitempty"`
+	// DesiredAction is "install" / "rescue" / "" (none).
+	DesiredAction string    `json:"desired_action,omitempty"`
 	RequestedAt   time.Time `json:"requested_at,omitempty"`
 	ExpiresAt     time.Time `json:"expires_at,omitempty"`
 }

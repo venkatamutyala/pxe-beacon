@@ -210,13 +210,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /status.json", s.handleStatusJSON)
 	s.mux.HandleFunc("GET /assets/{target}/{file}", s.handleAsset)
 
-	// v0.7.1: REST API for queued boot actions. Loopback-only; no CSRF
-	// since the audience is curl/scripts (not browsers with cookies).
-	// Renamed in v0.7.1 (was arm/disarm in v0.7.0; settled on
-	// deploy/rescue/cancel per MaaS naming convention).
-	s.mux.Handle("POST /api/v1/machines/{mac}/deploy", loopbackOnly(http.HandlerFunc(s.handleAPIDeploy)))
-	s.mux.Handle("POST /api/v1/machines/{mac}/rescue", loopbackOnly(http.HandlerFunc(s.handleAPIRescue)))
-	s.mux.Handle("POST /api/v1/machines/{mac}/cancel", loopbackOnly(http.HandlerFunc(s.handleAPICancel)))
+	// v0.8.0: K8s-style declarative boot-intent API. Hard-cut from
+	// v0.7.1 (no aliases). Loopback-only, no CSRF (curl/scripts/UI,
+	// not cookie-auth browsers). Tool-friendly: PUT is idempotent so
+	// Terraform / Ansible / React Query map cleanly.
+	s.mux.Handle("PUT /api/v1/machines/{mac}/intent", loopbackOnly(http.HandlerFunc(s.handleAPISetIntent)))
+	s.mux.Handle("GET /api/v1/machines/{mac}/intent", loopbackOnly(http.HandlerFunc(s.handleAPIGetIntent)))
 	s.mux.Handle("GET /api/v1/machines/{mac}", loopbackOnly(http.HandlerFunc(s.handleAPIMachine)))
 	s.mux.Handle("GET /api/v1/machines", loopbackOnly(http.HandlerFunc(s.handleAPIList)))
 
@@ -823,12 +822,12 @@ func (s *Server) handleStatusJSON(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snap := s.opts.FleetStatus.Snapshot()
-	// v0.7.1: enrich each row with the current pending action.
+	// v0.8.0: enrich each row with the desired action (K8s-style).
 	if s.opts.Pending != nil {
 		for i := range snap {
 			action, at, exp, ok := s.opts.Pending.Status(snap[i].MAC)
 			if ok {
-				snap[i].PendingAction = string(action)
+				snap[i].DesiredAction = string(action)
 				snap[i].RequestedAt = at
 				snap[i].ExpiresAt = exp
 			}

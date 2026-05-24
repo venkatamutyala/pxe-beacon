@@ -1,7 +1,9 @@
 package httpd
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"time"
 
@@ -9,30 +11,69 @@ import (
 	"github.com/venkatamutyala/pxe-beacon/internal/pending"
 )
 
-// machineAPIView is the JSON shape returned by every /api/v1/machines/*
-// endpoint. Combines fleet config + live tracker state + pending action.
+// v0.8.0 K8s-style boot-intent API.
 //
-// v0.7.1 vocabulary (was {armed, armed_at} in v0.7.0):
-//   - pending_action: "deploy" | "rescue" | "" (none)
-//   - requested_at:   when the action was queued (omitted when none)
-//   - expires_at:     when the queued action will auto-cancel (omitted when none / no expiry)
-//   - state:          existing install-progress event from the Tracker
+// One resource per machine, idempotent PUT to set desired state.
+// Compared to v0.7.1's POST /deploy / /rescue / /cancel verbs:
+//
+//	PUT  /api/v1/machines/{mac}/intent   {"action": "install"|"rescue"|null}
+//	GET  /api/v1/machines/{mac}/intent   → {desired, observed}
+//	GET  /api/v1/machines                → list with desired + observed
+//	GET  /api/v1/machines/{mac}          → single with desired + observed
+//
+// Picked over per-feature subtrees (Hetzner-style /boot/install +
+// /boot/rescue) for tool-friendliness: Terraform / Ansible / React
+// Query map cleanly to PUT-on-resource. See the v0.8.0 PM review
+// in plan history.
+
+// desiredView is the operator's queued intent for next PXE boot.
+type desiredView struct {
+	Action      string    `json:"action,omitempty"` // "install" | "rescue" | ""
+	RequestedAt time.Time `json:"requested_at,omitempty"`
+	ExpiresAt   time.Time `json:"expires_at,omitempty"`
+}
+
+// observedView is what the install-progress tracker most recently saw.
+type observedView struct {
+	Phase    string    `json:"phase,omitempty"`
+	LastSeen time.Time `json:"last_seen,omitempty"`
+}
+
+// machineAPIView is the JSON shape returned by GET /api/v1/machines/{mac}
+// and (per-entry) by GET /api/v1/machines.
 type machineAPIView struct {
-	MAC           string    `json:"mac"`
-	Name          string    `json:"name,omitempty"`
-	Boot          string    `json:"boot,omitempty"`
-	PendingAction string    `json:"pending_action,omitempty"`
-	RequestedAt   time.Time `json:"requested_at,omitempty"`
-	ExpiresAt     time.Time `json:"expires_at,omitempty"`
-	State         string    `json:"state,omitempty"`
+	MAC      string       `json:"mac"`
+	Name     string       `json:"name,omitempty"`
+	Boot     string       `json:"boot,omitempty"`
+	Desired  desiredView  `json:"desired"`
+	Observed observedView `json:"observed"`
+}
+
+// intentView is the standalone shape returned by GET /api/v1/machines/{mac}/intent.
+// Same desired + observed pair but at the resource root (no surrounding
+// machine fields), matching K8s subresource conventions.
+type intentView struct {
+	MAC      string       `json:"mac"`
+	Desired  desiredView  `json:"desired"`
+	Observed observedView `json:"observed"`
+}
+
+// intentPUTBody is what a client PUTs to set desired intent. We
+// parse Action as a json.RawMessage so we can distinguish three
+// states the spec demands:
+//
+//	missing key             → 400 (operator must be explicit)
+//	"action": null          → clear pending
+//	"action": "install"|... → queue that action
+type intentPUTBody struct {
+	Action json.RawMessage `json:"action"`
 }
 
 type apiErrorView struct {
 	Error string `json:"error"`
 }
 
-// apiReady asserts fleet + Pending are wired. Writes a JSON error and
-// returns false otherwise.
+// apiReady asserts fleet + Pending are wired.
 func (s *Server) apiReady(w http.ResponseWriter) bool {
 	if s.opts.Fleet == nil || s.opts.FleetStatus == nil {
 		writeAPIError(w, http.StatusNotFound,
@@ -40,16 +81,12 @@ func (s *Server) apiReady(w http.ResponseWriter) bool {
 		return false
 	}
 	if s.opts.Pending == nil {
-		writeAPIError(w, http.StatusNotFound,
-			"pending-action store not configured")
+		writeAPIError(w, http.StatusNotFound, "pending-action store not configured")
 		return false
 	}
 	return true
 }
 
-// apiExtractFleetMAC canonicalizes the {mac} path value AND verifies
-// the MAC is a known fleet member. Returns canonical MAC + Profile on
-// success; writes JSON error + ""+zero on failure.
 func (s *Server) apiExtractFleetMAC(w http.ResponseWriter, r *http.Request) (string, fleet.Profile) {
 	raw := r.PathValue("mac")
 	if raw == "" {
@@ -69,8 +106,10 @@ func (s *Server) apiExtractFleetMAC(w http.ResponseWriter, r *http.Request) (str
 	return canon, p
 }
 
-// handleAPIDeploy queues a deploy action.
-func (s *Server) handleAPIDeploy(w http.ResponseWriter, r *http.Request) {
+// handleAPISetIntent — PUT /api/v1/machines/{mac}/intent
+// Idempotent. Body: {"action": "install" | "rescue" | null}.
+// Null clears any pending intent. Missing "action" field is a 400.
+func (s *Server) handleAPISetIntent(w http.ResponseWriter, r *http.Request) {
 	if !s.apiReady(w) {
 		return
 	}
@@ -78,41 +117,72 @@ func (s *Server) handleAPIDeploy(w http.ResponseWriter, r *http.Request) {
 	if mac == "" {
 		return
 	}
-	if _, err := s.opts.Pending.Deploy(mac); err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "deploy: "+err.Error())
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 8192))
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "read body: "+err.Error())
 		return
 	}
-	s.log.Infof("POST %s -> 200, deploy queued for %s (%s)", r.URL.Path, p.Name, mac)
-	writeAPIView(w, s.buildView(mac, p))
+	var in intentPUTBody
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "decode body: "+err.Error())
+		return
+	}
+	// Require explicit "action" key. A naked {} is ambiguous.
+	if len(in.Action) == 0 {
+		writeAPIError(w, http.StatusBadRequest,
+			`body must include "action" key with value "install", "rescue", or null`)
+		return
+	}
+	// Decode the action value. JSON null → empty string (= cancel).
+	// A string value → that string. Anything else → 400.
+	var action string
+	if string(in.Action) != "null" {
+		if err := json.Unmarshal(in.Action, &action); err != nil {
+			writeAPIError(w, http.StatusBadRequest,
+				`"action" must be a string or null; got `+string(in.Action))
+			return
+		}
+	}
+	switch action {
+	case "install":
+		if _, err := s.opts.Pending.Install(mac); err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "install: "+err.Error())
+			return
+		}
+		s.log.Infof("PUT %s -> 200, intent=install for %s (%s)", r.URL.Path, p.Name, mac)
+	case "rescue":
+		if _, err := s.opts.Pending.Rescue(mac); err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "rescue: "+err.Error())
+			return
+		}
+		s.log.Infof("PUT %s -> 200, intent=rescue for %s (%s)", r.URL.Path, p.Name, mac)
+	case "":
+		s.opts.Pending.Cancel(mac)
+		s.log.Infof("PUT %s -> 200, intent cleared for %s (%s)", r.URL.Path, p.Name, mac)
+	default:
+		writeAPIError(w, http.StatusBadRequest,
+			`action must be "install", "rescue", or null; got `+action)
+		return
+	}
+	writeJSON(w, s.buildIntentView(mac))
 }
 
-// handleAPIRescue is a v0.7.1 stub. Returns 501 until the rescue
-// boot target is wired into the dispatch script.
-func (s *Server) handleAPIRescue(w http.ResponseWriter, r *http.Request) {
+// handleAPIGetIntent — GET /api/v1/machines/{mac}/intent
+func (s *Server) handleAPIGetIntent(w http.ResponseWriter, r *http.Request) {
 	if !s.apiReady(w) {
 		return
 	}
-	if _, p := s.apiExtractFleetMAC(w, r); p.Name == "" {
-		return
-	}
-	writeAPIError(w, http.StatusNotImplemented,
-		"rescue boot target not yet implemented; tracked in TODO")
-}
-
-// handleAPICancel clears any pending action.
-func (s *Server) handleAPICancel(w http.ResponseWriter, r *http.Request) {
-	if !s.apiReady(w) {
-		return
-	}
-	mac, p := s.apiExtractFleetMAC(w, r)
+	mac, _ := s.apiExtractFleetMAC(w, r)
 	if mac == "" {
 		return
 	}
-	s.opts.Pending.Cancel(mac)
-	s.log.Infof("POST %s -> 200, cancelled pending action for %s (%s)", r.URL.Path, p.Name, mac)
-	writeAPIView(w, s.buildView(mac, p))
+	writeJSON(w, s.buildIntentView(mac))
 }
 
+// handleAPIMachine — GET /api/v1/machines/{mac}
 func (s *Server) handleAPIMachine(w http.ResponseWriter, r *http.Request) {
 	if !s.apiReady(w) {
 		return
@@ -121,9 +191,10 @@ func (s *Server) handleAPIMachine(w http.ResponseWriter, r *http.Request) {
 	if mac == "" {
 		return
 	}
-	writeAPIView(w, s.buildView(mac, p))
+	writeJSON(w, s.buildMachineView(mac, p))
 }
 
+// handleAPIList — GET /api/v1/machines
 func (s *Server) handleAPIList(w http.ResponseWriter, r *http.Request) {
 	if !s.apiReady(w) {
 		return
@@ -131,45 +202,60 @@ func (s *Server) handleAPIList(w http.ResponseWriter, r *http.Request) {
 	machines := s.opts.Fleet.ListMachines()
 	out := make([]machineAPIView, 0, len(machines))
 	for _, m := range machines {
-		out = append(out, s.buildView(m.MAC, m.Profile))
+		out = append(out, s.buildMachineView(m.MAC, m.Profile))
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(map[string]any{
+	writeJSON(w, map[string]any{
 		"pending_ttl_s": pendingTTLSeconds(s.opts.Pending),
 		"machines":      out,
-	}); err != nil {
-		s.log.Warnf("GET %s: encode error: %v", r.URL.Path, err)
-	}
+	})
 }
 
-func (s *Server) buildView(canon string, p fleet.Profile) machineAPIView {
-	view := machineAPIView{
-		MAC:  canon,
-		Name: p.Name,
-		Boot: p.Boot,
-	}
+func (s *Server) buildDesired(canon string) desiredView {
+	v := desiredView{}
 	if s.opts.Pending != nil {
 		action, at, exp, ok := s.opts.Pending.Status(canon)
 		if ok {
-			view.PendingAction = string(action)
-			view.RequestedAt = at
-			view.ExpiresAt = exp
+			v.Action = string(action)
+			v.RequestedAt = at
+			v.ExpiresAt = exp
 		}
 	}
+	return v
+}
+
+func (s *Server) buildObserved(canon string) observedView {
+	v := observedView{}
 	if s.opts.FleetStatus != nil {
 		for _, st := range s.opts.FleetStatus.Snapshot() {
 			if st.MAC == canon {
-				view.State = string(st.State)
+				v.Phase = string(st.State)
+				v.LastSeen = st.LastSeen
 				break
 			}
 		}
 	}
-	return view
+	return v
 }
 
-func writeAPIView(w http.ResponseWriter, v machineAPIView) {
+func (s *Server) buildIntentView(canon string) intentView {
+	return intentView{
+		MAC:      canon,
+		Desired:  s.buildDesired(canon),
+		Observed: s.buildObserved(canon),
+	}
+}
+
+func (s *Server) buildMachineView(canon string, p fleet.Profile) machineAPIView {
+	return machineAPIView{
+		MAC:      canon,
+		Name:     p.Name,
+		Boot:     p.Boot,
+		Desired:  s.buildDesired(canon),
+		Observed: s.buildObserved(canon),
+	}
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -182,11 +268,10 @@ func writeAPIError(w http.ResponseWriter, code int, msg string) {
 	_ = json.NewEncoder(w).Encode(apiErrorView{Error: msg})
 }
 
-// pendingTTLSeconds returns the store's TTL in seconds; 0 if nil or
-// no expiry configured.
 func pendingTTLSeconds(s *pending.Store) int {
 	if s == nil {
 		return 0
 	}
 	return int(s.TTL() / time.Second)
 }
+

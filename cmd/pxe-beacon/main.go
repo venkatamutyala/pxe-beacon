@@ -280,9 +280,9 @@ func printBanner(log *narrlog.Logger, ver string, picked *netinfo.Picked, advIP 
 		log.Infof("  fleet config  : %s (SIGHUP reloads)", configPath)
 		log.Infof("  status page   : http://%s:%d/status", advIP, httpPort)
 		if pendingTTL > 0 {
-			log.Infof("  queue actions : POST /api/v1/machines/{mac}/{deploy,rescue,cancel} (TTL %s)", pendingTTL)
+			log.Infof("  boot intent   : PUT /api/v1/machines/{mac}/intent {\"action\":\"install\"|\"rescue\"|null} (TTL %s)", pendingTTL)
 		} else {
-			log.Infof("  queue actions : POST /api/v1/machines/{mac}/{deploy,rescue,cancel} (no expiry)")
+			log.Infof("  boot intent   : PUT /api/v1/machines/{mac}/intent {\"action\":\"install\"|\"rescue\"|null} (no expiry)")
 		}
 	} else {
 		log.Infof("  fleet config  : (none — single-machine mode; pass -config for fleet mode)")
