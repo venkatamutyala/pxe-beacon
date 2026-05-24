@@ -477,6 +477,143 @@ Tagged and released via the existing GitHub Actions release workflow.
 
 ---
 
+## v0.2.0 — fleet PXE manager
+
+v0.1 was a one-machine PXE server: process-global flags decide what to
+serve, every client gets the same OFFER. The actual user, Venkat, has
+10 computers with mixed OSes that need unattended cloud-init installs.
+v0.2 is that product.
+
+### What landed
+
+**`internal/fleet/`** (new package)
+- `fleet.go` — YAML config parser, MAC normalization (colon / hyphen /
+  dot / no-separator forms), per-MAC `Lookup(mac) → Profile`, SIGHUP
+  reload, validation (known boot targets, dup MACs, missing cloud-init
+  files for autoinstall targets, missing iPXE script for `custom`).
+  12 unit tests.
+- `status.go` — in-memory per-MAC tracker. Events
+  `firmware-dhcp → firmware-fetched → ipxe-dhcp → user-data-fetched →
+  installer-done` with monotonic state advancement, stall detection,
+  snapshot of configured + observed-but-unknown machines. 4 unit tests.
+
+**`internal/boot/`** (new package)
+- `targets.go` — `RenderAutoexec(target, ctx)` for the built-in
+  templates; `RenderCustom(path, ctx)` for operator scripts;
+  `RedirectorScript(ip, port)` for the generic TFTP autoexec.ipxe
+  that uses iPXE's `${net0/mac:hexhyp}` to bounce per-MAC dispatch
+  into HTTP. 9 unit tests.
+- `internal/assets/scripts/autoexec/{menu,ubuntu-22.04,ubuntu-24.04,debian-12}.ipxe`
+  — embedded iPXE templates. Ubuntu chains through netboot.xyz's
+  hosted casper/{vmlinuz,initrd} for v0.2.0; Debian uses
+  `deb.debian.org` directly.
+
+**`internal/proxydhcp/`**
+- `Config` gains `Fleet *fleet.Fleet` (nil-safe). `BuildOffer`
+  resolves per-MAC name + target; `Decision` carries them through.
+  `logDecision` renders `client <name> (<mac>) ...` when configured.
+  3 new fleet-routing unit tests.
+- `ServerOptions.StatusTracker` is the new wire to `fleet.Tracker`.
+  The listener calls `Note(mac, firmware-dhcp)` / `Note(mac,
+  ipxe-dhcp)` when sending OFFERs, so the status page sees motion
+  in real time.
+
+**`internal/tftp/`**
+- `Options.Autoexec` is an injection point for the redirector. In
+  fleet mode, TFTP serves it for `RRQ "autoexec.ipxe"`; in single-
+  machine mode, the file still 404s (no behavior change for v0.1.3
+  users). 2 new unit tests.
+
+**`internal/httpd/`**
+- Six new routes (Go 1.22+ `mux.HandleFunc("GET /pattern", h)`):
+  - `GET /autoinstall/{mac}/autoexec.ipxe` — per-MAC iPXE script via
+    the boot package.
+  - `GET /autoinstall/{mac}/user-data` — Go-templated cloud-init
+    user-data; vars: `Name, MAC, MACHyp, AdvertisedIP, HTTPPort`.
+  - `GET /autoinstall/{mac}/meta-data` — minimal NoCloud meta-data
+    (`instance-id` + `local-hostname` derived from the fleet entry).
+  - `POST /autoinstall/{mac}/done` — cloud-init phone_home callback.
+    Updates status tracker → installer-done.
+  - `GET /status` — embedded HTML template, auto-refreshing every 5s,
+    no JS framework. Color-coded status dots.
+  - `GET /status.json` — same data as the HTML, machine-readable.
+- All six 404 cleanly with a helpful message when `-config` isn't
+  passed → drop-in compat for v0.1.3 users. 9 new fleet-route tests.
+
+**`cmd/pxe-beacon/main.go`**
+- New `-config <path>` flag. When set, loads the fleet (refuses to
+  start on validation errors), constructs `fleet.NewTracker`, wires
+  both into proxydhcp + tftp + httpd. SIGHUP handler reloads the
+  config in place. When unset, `fleet.Empty()` keeps the v0.1.3
+  default-everyone-to-menu behavior intact.
+- Banner now prints fleet config path + status page URL.
+
+**P1+P2 polish (shipped alongside)**
+- TFTP `autoexec.ipxe` 404 → info (benign), not warn.
+- TFTP tsize-retry abort (code=8) → debug, not error.
+- `Listener.NoteServed` with opaque tag clears all pending hints,
+  fixing the v0.1.x false-positive "never fetched" on success.
+
+### Status visibility model (no IPMI required)
+
+The wire tells us everything we need. Per-MAC state machine:
+
+| status | trigger |
+|---|---|
+| `pending` | in fleet.yaml, never seen on wire |
+| `firmware-dhcp` | we OFFERed on udp/67 (proxydhcp) |
+| `firmware-fetched` | TFTP serve completed (transitively — we infer from later events) |
+| `ipxe-dhcp` | we OFFERed to `userclass=iPXE` (proxydhcp) |
+| `user-data-fetched` | `GET /autoinstall/{mac}/user-data` returned 200 (httpd) |
+| `installer-done` | cloud-init phone_home POSTed `/done` (httpd) |
+| `stalled` (overlay) | last activity > 5min (configurable) |
+
+### Verification
+
+`go test ./...` — all green. Tally:
+- internal/fleet: 16 tests
+- internal/boot: 9 tests
+- internal/proxydhcp: 17 unit + 2 e2e
+- internal/tftp: 6 tests
+- internal/httpd: 14 tests
+
+End-to-end loopback smoke (in `debug.txt`-style commands during dev):
+- `sudo ./pxe-beacon -config ./fleet.example.yaml -advertise-ip 127.0.0.1 ...`
+- `curl /status.json` → 4 machines visible, server metadata
+- `curl /autoinstall/.../autoexec.ipxe` → renders correct OS template
+- `curl /autoinstall/.../user-data` → renders Go template (hostname,
+  phone_home URL, etc.)
+- `curl /autoinstall/.../meta-data` → instance-id + local-hostname
+- `POST /autoinstall/.../done` → status transitions to installer-done
+- `tftp ... get autoexec.ipxe` → redirector with `${net0/mac:hexhyp}`
+- Edit `fleet.yaml` → `kill -HUP $(pgrep -x pxe-beacon)` → next
+  `curl /status.json` reflects new config (verified 1 → 3 machines
+  without restart).
+
+### Documentation
+
+- `fleet.example.yaml` — annotated example with 4 machines
+  (2× ubuntu-22.04, 1× debian-12, 1× custom rescue).
+- `examples/{kube-node.yaml, debian-db.yaml, rescue.ipxe}` — drop-in
+  user-data templates that exercise the templating + phone_home flow.
+- `make demo-fleet` — boots pxe-beacon on loopback with
+  `fleet.example.yaml` for quick HTTP inspection.
+- README rewritten with a v0.2 fleet walkthrough + flag table.
+
+### Out of scope (deferred to v0.2.x / v0.3)
+
+- Per-machine local kernel/initrd caching (`pxe-beacon fetch <target>`)
+  for airplane-mode operation.
+- Additional OS targets beyond ubuntu-22.04/24.04/debian-12.
+- Full DHCP server mode (`-dhcp`).
+- A real `discover.pcap` fixture (the user asked to defer this to
+  end-of-dev).
+- Templated cloud-init "defaults + overrides" hybrid — separate file
+  per machine is the v0.2 contract. Operators can pre-template
+  outside pxe-beacon with helm/jinja if they want DRY.
+
+---
+
 ## v0.1.3 — serve `netboot.xyz-snponly.efi` for x86_64 UEFI
 
 The v0.1.2 user reported that PXE-booting an AMI/Phoenix-firmware

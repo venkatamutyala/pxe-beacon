@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/venkatamutyala/pxe-beacon/internal/assets"
+	"github.com/venkatamutyala/pxe-beacon/internal/boot"
+	"github.com/venkatamutyala/pxe-beacon/internal/fleet"
 	"github.com/venkatamutyala/pxe-beacon/internal/httpd"
 	"github.com/venkatamutyala/pxe-beacon/internal/narrlog"
 	"github.com/venkatamutyala/pxe-beacon/internal/netinfo"
@@ -38,6 +40,7 @@ func main() {
 		flagTFTPListen = flag.String("tftp-listen", "0.0.0.0:69", "TFTP listen address (host:port)")
 		flagCrossCert  = flag.Bool("crosscert", false, "emit `set crosscert http://ca.ipxe.org/auto` in boot.ipxe (helps older iPXE builds with HTTPS netboot.xyz)")
 		flagHintAfter  = flag.Duration("hint-after", 10*time.Second, "log a 'client never fetched' hint this long after an OFFER if no follow-up arrives (0 disables)")
+		flagConfig     = flag.String("config", "", "path to fleet.yaml — enables per-MAC routing, autoinstall, and /status page (unset = v0.1.3 single-machine behavior)")
 		flagPrintVer   = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Usage = func() {
@@ -78,15 +81,31 @@ func main() {
 		advIP = ip.To4()
 	}
 
-	printBanner(log, version, picked, advIP, *flagListen, *flagHTTPPort, *flagTFTPListen, *flagChainURL, *flagIPXEScript, lvl)
+	printBanner(log, version, picked, advIP, *flagListen, *flagHTTPPort, *flagTFTPListen, *flagChainURL, *flagIPXEScript, *flagConfig, lvl)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// Load fleet config if -config was passed; otherwise construct
+	// an empty fleet so every MAC gets the v0.1.3 menu default.
+	var fl *fleet.Fleet
+	if *flagConfig != "" {
+		var err error
+		fl, err = fleet.Load(*flagConfig, log)
+		if err != nil {
+			log.Errorf("load fleet config: %v", err)
+			os.Exit(1)
+		}
+	} else {
+		fl = fleet.Empty(log)
+	}
+	statusTracker := fleet.NewTracker(fl, 5*time.Minute)
 
 	cfg := proxydhcp.Config{
 		AdvertisedIP:   advIP,
 		HTTPPort:       *flagHTTPPort,
 		IPXEScriptPath: "/boot.ipxe",
+		Fleet:          fl,
 	}
 
 	lst, err := proxydhcp.New(proxydhcp.ServerOptions{
@@ -95,16 +114,27 @@ func main() {
 		Config:          cfg,
 		Logger:          log,
 		FollowUpTimeout: *flagHintAfter,
+		StatusTracker:   statusTracker,
 	})
 	if err != nil {
 		log.Errorf("init proxydhcp: %v", err)
 		os.Exit(1)
 	}
 
+	// In fleet mode, serve the autoexec.ipxe redirector via TFTP so
+	// netboot.xyz iPXE will fetch our per-MAC HTTP script.
+	var autoexecFn tftpd.AutoexecRedirector
+	if *flagConfig != "" {
+		autoexecFn = func() []byte {
+			return boot.RedirectorScript(advIP.String(), *flagHTTPPort)
+		}
+	}
+
 	tftpSrv, err := tftpd.New(tftpd.Options{
-		Listen:  *flagTFTPListen,
-		Logger:  log,
-		Tracker: lst,
+		Listen:   *flagTFTPListen,
+		Logger:   log,
+		Tracker:  lst,
+		Autoexec: autoexecFn,
 	})
 	if err != nil {
 		log.Errorf("init tftp: %v", err)
@@ -114,16 +144,24 @@ func main() {
 	httpSrv, err := httpd.New(httpd.Options{
 		Listen:         fmt.Sprintf("%s:%d", *flagListen, *flagHTTPPort),
 		AdvertisedIP:   advIP.String(),
+		HTTPPort:       *flagHTTPPort,
 		ChainURL:       *flagChainURL,
 		IPXEScriptPath: cfg.IPXEScriptPath,
 		IPXEScriptFile: *flagIPXEScript,
 		SetCrossCert:   *flagCrossCert,
 		Logger:         log,
 		Tracker:        lst,
+		Fleet:          fl,
+		FleetStatus:    statusTracker,
 	})
 	if err != nil {
 		log.Errorf("init http: %v", err)
 		os.Exit(1)
+	}
+
+	// SIGHUP triggers a fleet config reload (no-op for Empty fleet).
+	if *flagConfig != "" {
+		go watchSIGHUP(ctx, fl, log)
 	}
 
 	errc := make(chan error, 3)
@@ -156,8 +194,27 @@ func main() {
 	log.Infof("pxe-beacon: shutdown complete")
 }
 
+// watchSIGHUP reloads the fleet config when SIGHUP arrives. Cancelled
+// by ctx so it dies with the rest of the program.
+func watchSIGHUP(ctx context.Context, fl *fleet.Fleet, log *narrlog.Logger) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGHUP)
+	defer signal.Stop(ch)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ch:
+			log.Infof("SIGHUP received, reloading fleet config")
+			if err := fl.Reload(); err != nil {
+				log.Errorf("fleet reload failed: %v (keeping previous config)", err)
+			}
+		}
+	}
+}
+
 func printBanner(log *narrlog.Logger, ver string, picked *netinfo.Picked, advIP net.IP,
-	listen string, httpPort int, tftpListen, chainURL, scriptOverride string, lvl narrlog.Level) {
+	listen string, httpPort int, tftpListen, chainURL, scriptOverride, configPath string, lvl narrlog.Level) {
 
 	log.Infof("pxe-beacon %s (%s/%s)", ver, runtime.GOOS, runtime.GOARCH)
 	log.Infof("  interface     : %s", picked.Iface.Name)
@@ -166,6 +223,12 @@ func printBanner(log *narrlog.Logger, ver string, picked *netinfo.Picked, advIP 
 	log.Infof("  TFTP          : %s", tftpListen)
 	log.Infof("  HTTP          : %s:%d (chain script /boot.ipxe)", listen, httpPort)
 	log.Infof("  chain-url     : %s", chainURL)
+	if configPath != "" {
+		log.Infof("  fleet config  : %s (SIGHUP reloads)", configPath)
+		log.Infof("  status page   : http://%s:%d/status", advIP, httpPort)
+	} else {
+		log.Infof("  fleet config  : (none — single-machine mode; pass -config for fleet mode)")
+	}
 	log.Infof("  loglevel      : %s", lvl)
 
 	if picked.IsWireless {

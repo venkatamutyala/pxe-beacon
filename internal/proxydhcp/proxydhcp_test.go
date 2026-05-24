@@ -3,11 +3,15 @@ package proxydhcp
 import (
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/iana"
+
+	"github.com/venkatamutyala/pxe-beacon/internal/fleet"
 )
 
 // newDiscover crafts a synthetic DISCOVER closely matching what a UEFI
@@ -347,6 +351,84 @@ func TestBuildOffer_DiscoverStillRepliesOFFER(t *testing.T) {
 	}
 	if got := reply.MessageType(); got != dhcpv4.MessageTypeOffer {
 		t.Errorf("reply msg type = %s, want OFFER", got)
+	}
+}
+
+// fleetCfg writes a tiny fleet.yaml + side-files and returns a loaded
+// *fleet.Fleet pointing at them. Used by the per-MAC routing tests.
+func fleetCfg(t *testing.T) *fleet.Fleet {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ubuntu.yaml"), []byte("#cloud-config"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "fleet.yaml"), []byte(`
+machines:
+  - mac: 58:47:ca:70:c7:c9
+    name: kube-1
+    boot: ubuntu-22.04
+    cloud_init: ./ubuntu.yaml
+  - mac: aa:bb:cc:dd:ee:01
+    name: rescue-jumpbox
+    boot: menu
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := fleet.Load(filepath.Join(dir, "fleet.yaml"), nil)
+	if err != nil {
+		t.Fatalf("fleet.Load: %v", err)
+	}
+	return f
+}
+
+func TestBuildOffer_FleetPopulatesMachineName(t *testing.T) {
+	req := newDiscover(t, "58:47:ca:70:c7:c9", iana.EFI_X86_64, "PXEClient", "")
+	cfg := defaultCfg()
+	cfg.Fleet = fleetCfg(t)
+
+	_, dec, err := BuildOffer(req, cfg)
+	if err != nil {
+		t.Fatalf("BuildOffer: %v", err)
+	}
+	if dec.MachineName != "kube-1" {
+		t.Errorf("MachineName = %q, want kube-1", dec.MachineName)
+	}
+	if dec.BootTarget != "ubuntu-22.04" {
+		t.Errorf("BootTarget = %q, want ubuntu-22.04", dec.BootTarget)
+	}
+}
+
+func TestBuildOffer_FleetUnknownMAC_DefaultsToMenu(t *testing.T) {
+	req := newDiscover(t, "11:22:33:44:55:66", iana.EFI_X86_64, "PXEClient", "")
+	cfg := defaultCfg()
+	cfg.Fleet = fleetCfg(t)
+
+	_, dec, err := BuildOffer(req, cfg)
+	if err != nil {
+		t.Fatalf("BuildOffer: %v", err)
+	}
+	if dec.MachineName != "" {
+		t.Errorf("MachineName = %q, want empty (unknown MAC)", dec.MachineName)
+	}
+	if dec.BootTarget != "menu" {
+		t.Errorf("BootTarget = %q, want menu (default for unknown MAC)", dec.BootTarget)
+	}
+}
+
+func TestBuildOffer_NilFleet_NoCrashAndDefaultsToMenu(t *testing.T) {
+	req := newDiscover(t, "58:47:ca:70:c7:c9", iana.EFI_X86_64, "PXEClient", "")
+	cfg := defaultCfg()
+	// cfg.Fleet is nil — should be safe, behave like v0.1.3.
+
+	_, dec, err := BuildOffer(req, cfg)
+	if err != nil {
+		t.Fatalf("BuildOffer with nil Fleet: %v", err)
+	}
+	if dec.MachineName != "" {
+		t.Errorf("MachineName should be empty with no fleet, got %q", dec.MachineName)
+	}
+	if dec.BootTarget != "menu" {
+		t.Errorf("BootTarget = %q, want menu (nil fleet path)", dec.BootTarget)
 	}
 }
 

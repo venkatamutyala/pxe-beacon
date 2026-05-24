@@ -1,0 +1,21 @@
+#cloud-config
+# Debian 12 example. Same template vars as the Ubuntu example.
+hostname: {{.Name}}
+fqdn: {{.Name}}.lab.local
+
+users:
+  - name: ops
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - "ssh-ed25519 AAAAC3N... ops@laptop"
+
+packages:
+  - postgresql-15
+  - vim
+  - curl
+
+phone_home:
+  url: http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}/done
+  post: all
+  tries: 10

@@ -39,8 +39,8 @@ func TestRenderAutoexec_Menu(t *testing.T) {
 	if !strings.HasPrefix(s, "#!ipxe") {
 		t.Errorf("menu autoexec missing #!ipxe shebang:\n%s", s)
 	}
-	if !strings.Contains(s, "exit") {
-		t.Errorf("menu autoexec should exit so embed.ipxe takes over:\n%s", s)
+	if !strings.Contains(s, "boot.netboot.xyz/menu.ipxe") {
+		t.Errorf("menu autoexec should chain to netboot.xyz menu:\n%s", s)
 	}
 	if !strings.Contains(s, "kube-1") {
 		t.Errorf("Name not templated in:\n%s", s)
@@ -57,11 +57,11 @@ func TestRenderAutoexec_Ubuntu2204(t *testing.T) {
 		"#!ipxe",
 		"autoinstall",
 		"ds=nocloud-net",
-		"10.0.0.5",                        // AdvertisedIP
-		"8080",                            // HTTPPort
-		"58-47-ca-70-c7-c9",               // MACHyp
-		"casper/vmlinuz",                  // Ubuntu kernel path
-		"casper/initrd",                   // initrd
+		"10.0.0.5",          // AdvertisedIP
+		"8080",              // HTTPPort
+		"58-47-ca-70-c7-c9", // MACHyp
+		"casper/vmlinuz",    // Ubuntu kernel path
+		"casper/initrd",     // initrd
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("ubuntu-22.04 autoexec missing %q:\n%s", want, s)

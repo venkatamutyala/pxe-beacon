@@ -9,6 +9,8 @@ import (
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv4/server4"
+
+	"github.com/venkatamutyala/pxe-beacon/internal/fleet"
 	"github.com/venkatamutyala/pxe-beacon/internal/narrlog"
 )
 
@@ -33,6 +35,9 @@ type ServerOptions struct {
 	// clients on loopback set false so we reply unicast to the peer
 	// and don't need to capture broadcast traffic.
 	BroadcastReply *bool
+	// StatusTracker, if non-nil, receives per-MAC fleet status events
+	// (firmware-dhcp, ipxe-dhcp) as the listener processes packets.
+	StatusTracker *fleet.Tracker
 }
 
 // OfferTracker lets the TFTP and HTTP servers notify the proxyDHCP
@@ -191,6 +196,20 @@ func (l *Listener) handleOne(source string, conn net.PacketConn, peer net.Addr, 
 	// Track the OFFER so the failure-path hint can fire if the
 	// client never follows up with TFTP/HTTP.
 	l.notePending(dec.ClientMAC)
+
+	// Record a status event for the fleet tracker (fleet mode only).
+	if l.opts.StatusTracker != nil {
+		var ev fleet.Event
+		switch dec.Stage {
+		case StageFirmwareTFTP, StageFirmwareHTTP:
+			ev = fleet.EventFirmwareDHCP
+		case StageIPXEScript:
+			ev = fleet.EventIPXEDHCP
+		}
+		if ev != "" {
+			l.opts.StatusTracker.Note(dec.ClientMAC, ev)
+		}
+	}
 }
 
 func (l *Listener) notePending(mac string) {
@@ -232,29 +251,37 @@ func logDecision(log *narrlog.Logger, source string, d Decision, err error) {
 		vc = "<absent>"
 	}
 
+	clientLabel := d.ClientMAC
+	if d.MachineName != "" {
+		clientLabel = fmt.Sprintf("%s (%s)", d.MachineName, d.ClientMAC)
+	}
+
 	switch {
 	case err == ErrSkip && d.IsBenignSkip():
-		log.Benign(fmt.Sprintf("%s from %s: %s", source, d.ClientMAC, d.SkipReason))
+		log.Benign(fmt.Sprintf("%s from %s: %s", source, clientLabel, d.SkipReason))
 		return
 	case err == ErrSkip:
-		log.Infof("%s skip: client=%s reason=%s", source, d.ClientMAC, d.SkipReason)
+		log.Infof("%s skip: client=%s reason=%s", source, clientLabel, d.SkipReason)
 		return
 	case err != nil:
-		log.Errorf("%s build offer failed for %s: %v", source, d.ClientMAC, err)
+		log.Errorf("%s build offer failed for %s: %v", source, clientLabel, err)
 		return
 	}
 
 	if d.UnknownArch {
 		log.Warnf("unrecognized option-93 arch from %s (%s); falling back to %s",
-			d.ClientMAC, archStr, d.Transport)
+			clientLabel, archStr, d.Transport)
 	}
 
 	stageNote := ""
 	if d.Stage == StageFirmwareHTTP {
 		stageNote = " (UEFI HTTP boot)"
 	}
+	if d.BootTarget != "" && d.BootTarget != "menu" {
+		stageNote += fmt.Sprintf(" [target=%s]", d.BootTarget)
+	}
 
-	log.Decision(d.ClientMAC, archStr, defaultStr(d.UserClass, "<none>"), d.Stage,
+	log.Decision(clientLabel, archStr, defaultStr(d.UserClass, "<none>"), d.Stage,
 		fmt.Sprintf("serve %s via %s from %s%s", d.BootFile, d.Transport, d.NextServer, stageNote))
 	log.Debugf("parsed: vendor-class=%q user-class=%q archs=%v selected=%v",
 		vc, d.UserClass, d.Archs, d.SelectedArch)

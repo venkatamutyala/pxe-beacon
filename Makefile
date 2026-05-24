@@ -8,7 +8,7 @@ DIST     := dist
 VERSION  := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build test fmt vet tidy clean cross run run-loopback \
+.PHONY: all build test fmt vet tidy clean cross run run-loopback demo-fleet \
         build-linux-amd64 build-linux-arm64 build-darwin-arm64 help
 
 all: build
@@ -56,14 +56,22 @@ run-loopback: build
 	sudo ./$(BIN) -listen 127.0.0.1 -tftp-listen 127.0.0.1:6969 \
 	              -advertise-ip 127.0.0.1 -http-port 8080 -loglevel info
 
+# Boot the example fleet config on loopback so you can curl /status
+# and inspect the per-MAC HTTP responses without any real hardware.
+demo-fleet: build
+	sudo ./$(BIN) -listen 127.0.0.1 -tftp-listen 127.0.0.1:6969 \
+	              -advertise-ip 127.0.0.1 -http-port 8080 \
+	              -config ./fleet.example.yaml -loglevel info
+
 clean:
 	rm -rf $(BIN) $(DIST) *.out *.test
 
 help:
 	@echo "targets:"
-	@echo "  make             - host build"
-	@echo "  make test        - go test ./..."
-	@echo "  make cross       - linux/amd64, linux/arm64, darwin/arm64"
-	@echo "  make run         - sudo ./pxe-beacon (auto interface)"
+	@echo "  make              - host build"
+	@echo "  make test         - go test ./..."
+	@echo "  make cross        - linux/amd64, linux/arm64, darwin/arm64"
+	@echo "  make run          - sudo ./pxe-beacon (auto interface)"
 	@echo "  make run-loopback - loopback smoke (sudo, high TFTP port)"
-	@echo "  make clean       - remove built artifacts"
+	@echo "  make demo-fleet   - loopback smoke with ./fleet.example.yaml loaded"
+	@echo "  make clean        - remove built artifacts"

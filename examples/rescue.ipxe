@@ -1,0 +1,15 @@
+#!ipxe
+# Example custom iPXE script — referenced from fleet.yaml as
+# `boot: custom` + `ipxe_script: ./examples/rescue.ipxe`.
+#
+# Templated by pxe-beacon — same vars as cloud-init files
+# ({{.Name}}, {{.MAC}}, {{.AdvertisedIP}}, {{.HTTPPort}}).
+#
+# This example chains directly to SystemRescue ISO. Replace with
+# whatever recovery image you want this machine to boot into.
+echo pxe-beacon: {{.Name}} ({{.MAC}}) -> rescue iPXE
+
+set base http://www.system-rescue.org/ipxe
+chain --replace --autofree ${base}/sysrescue-9.07.ipxe ||
+echo pxe-beacon: rescue chain failed; dropping to iPXE shell
+shell

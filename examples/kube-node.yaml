@@ -1,0 +1,39 @@
+#cloud-config
+# Example cloud-init user-data for an Ubuntu kube node.
+# Templated by pxe-beacon at request time — vars available:
+#   {{.Name}}          machine name from fleet.yaml
+#   {{.MAC}}           canonical colon-MAC
+#   {{.MACHyp}}        hyphen-MAC (for URL paths)
+#   {{.AdvertisedIP}}  pxe-beacon server IP
+#   {{.HTTPPort}}      pxe-beacon HTTP port
+
+autoinstall:
+  version: 1
+
+  identity:
+    hostname: {{.Name}}
+    username: ops
+    # Replace this hash. Generate with: mkpasswd --method=SHA-512 --rounds=4096
+    password: "$6$saltsalt$REPLACE_THIS_WITH_A_REAL_HASH"
+
+  ssh:
+    install-server: true
+    authorized-keys:
+      - "ssh-ed25519 AAAAC3N... ops@laptop"   # replace with your key
+
+  packages:
+    - curl
+    - ca-certificates
+    - vim
+    - containerd
+
+  late-commands:
+    - curtin in-target -- systemctl enable containerd
+
+# pxe-beacon receives a POST when the install finishes, transitioning
+# this machine to `installer-done` on /status. Keep the URL; the
+# template fills the rest.
+phone_home:
+  url: http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}/done
+  post: all
+  tries: 10

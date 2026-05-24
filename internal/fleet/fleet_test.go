@@ -49,8 +49,8 @@ func TestCanonicalMAC_Formats(t *testing.T) {
 func TestCanonicalMAC_Rejects(t *testing.T) {
 	for _, in := range []string{
 		"",
-		"58:47:ca:70:c7",        // too short
-		"58:47:ca:70:c7:c9:00",  // EUI-64
+		"58:47:ca:70:c7",       // too short
+		"58:47:ca:70:c7:c9:00", // EUI-64
 		"not a mac",
 		"zz:zz:zz:zz:zz:zz",
 	} {

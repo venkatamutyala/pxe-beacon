@@ -92,25 +92,101 @@ and uploads everything to a GitHub Release with auto-generated notes.
 
 ---
 
-## Run
+## Run — single machine (v0.1 mode)
 
 ```bash
-sudo ./pxe-beacon                            # auto-detect interface
+sudo ./pxe-beacon                            # auto-detect interface, boot netboot.xyz menu
 sudo ./pxe-beacon -interface eth0            # pin an interface
 sudo ./pxe-beacon -advertise-ip 192.168.1.10 # override advertised IP
 ```
 
-Useful flags:
+Every PXE client on the LAN gets the netboot.xyz menu. Same behavior as v0.1.3.
+
+---
+
+## Run — fleet mode (v0.2)
+
+Drop a `fleet.yaml` next to the binary describing your machines and
+point pxe-beacon at it with `-config`. Each MAC gets its own boot
+profile + cloud-init; pxe-beacon serves them automatically and a live
+status page shows the rack provisioning at <http://server:8080/status>.
+
+```bash
+sudo ./pxe-beacon -config /etc/pxe-beacon/fleet.yaml
+```
+
+Minimal `fleet.yaml`:
+
+```yaml
+defaults:
+  boot: menu        # unknown MACs → netboot.xyz menu (same as v0.1.3)
+
+machines:
+  - mac: 58:47:ca:70:c7:c9
+    name: kube-1
+    boot: ubuntu-22.04
+    cloud_init: ./kube-1.yaml      # cloud-init user-data, Go-templated
+
+  - mac: aa:bb:cc:dd:ee:01
+    name: db-primary
+    boot: debian-12
+    cloud_init: ./db-primary.yaml
+
+  - mac: 11:22:33:44:55:66
+    name: rescue
+    boot: custom
+    ipxe_script: ./rescue.ipxe     # raw iPXE for anything not in the built-in list
+```
+
+Built-in `boot:` values:
+
+| value          | what happens                                                                 |
+|----------------|------------------------------------------------------------------------------|
+| `menu`         | netboot.xyz interactive menu (default for unknown MACs)                      |
+| `ubuntu-22.04` | unattended Subiquity autoinstall via cloud-init                              |
+| `ubuntu-24.04` | unattended Subiquity autoinstall via cloud-init                              |
+| `debian-12`    | unattended debian-installer with NoCloud datasource (cloud-init)             |
+| `custom`       | serve the operator-provided `ipxe_script` file verbatim (Go-templated)       |
+
+A full working example lives in [`fleet.example.yaml`](./fleet.example.yaml)
+with cloud-init templates under [`examples/`](./examples/). Try it on
+loopback (no real PXE clients needed, just verifies the HTTP routes):
+
+```bash
+make demo-fleet
+# in another terminal:
+curl http://127.0.0.1:8080/status.json | jq
+curl http://127.0.0.1:8080/autoinstall/58-47-ca-70-c7-c9/user-data
+```
+
+**Live config reload:** edit `fleet.yaml`, then `kill -HUP $(pgrep -x pxe-beacon)`.
+No restart needed — the next OFFER picks up the new config.
+
+**Cloud-init phone_home:** the example user-data files include a
+`phone_home` block that tells cloud-init to POST to pxe-beacon when
+the install finishes. That transition flips the machine to
+`installer-done` on the status page — so you can see "did kube-3 ever
+finish?" from your browser without IPMI.
+
+### Status page
+
+`http://<advertised-ip>:8080/status` shows a live, auto-refreshing
+table of every machine: pending → firmware-dhcp → firmware-fetched →
+ipxe-dhcp → user-data-fetched → installer-done. Machines stuck > 5
+minutes get a ⚠ stalled flag. JSON version at `/status.json`.
+
+### Flags
 
 | flag             | default                                       | what                                                   |
 |------------------|-----------------------------------------------|--------------------------------------------------------|
+| `-config`        | (unset → single-machine mode)                 | path to `fleet.yaml` — enables per-MAC routing         |
 | `-interface`     | (auto)                                        | network interface to advertise                         |
 | `-listen`        | `0.0.0.0`                                     | address to bind UDP sockets                            |
 | `-advertise-ip`  | (auto, from `-interface`)                     | override the IPv4 sent to clients                      |
-| `-http-port`     | `8080`                                        | HTTP port for iPXE binary + chain script               |
+| `-http-port`     | `8080`                                        | HTTP port (also the status page port)                  |
 | `-tftp-listen`   | `0.0.0.0:69`                                  | TFTP listen address                                    |
-| `-chain-url`     | `https://boot.netboot.xyz/menu.ipxe`          | URL the chain script chainloads                        |
-| `-ipxe-script`   | (embedded)                                    | path to a custom boot.ipxe template                    |
+| `-chain-url`     | `https://boot.netboot.xyz/menu.ipxe`          | URL the legacy `/boot.ipxe` chain script chainloads    |
+| `-ipxe-script`   | (embedded)                                    | path to a custom `/boot.ipxe` template                 |
 | `-crosscert`     | off                                           | emit `set crosscert` (older iPXE + HTTPS chain target) |
 | `-hint-after`    | `10s`                                         | fire the "client never fetched" hint after this        |
 | `-loglevel`      | `info`                                        | `error`, `warn`, `info`, `debug`                       |

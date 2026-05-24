@@ -83,8 +83,8 @@ type machineYAML struct {
 // interface proxydhcp + tftp + httpd consume.
 type Fleet struct {
 	mu       sync.RWMutex
-	path     string  // path to fleet.yaml; empty for Empty()
-	baseDir  string  // directory of path (for resolving relative cloud_init / ipxe_script)
+	path     string             // path to fleet.yaml; empty for Empty()
+	baseDir  string             // directory of path (for resolving relative cloud_init / ipxe_script)
 	machines map[string]Profile // canonical-MAC → resolved Profile
 	defaults Profile
 	log      *narrlog.Logger

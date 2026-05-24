@@ -1,0 +1,36 @@
+# pxe-beacon fleet configuration — example.
+#
+# Run: sudo ./pxe-beacon -config ./fleet.example.yaml
+# Then drop one of these MACs onto your LAN, power-cycle it, and watch
+# http://<advertised-ip>:8080/status in a browser.
+#
+# Reload without restarting: edit this file, then `kill -HUP <pid>`.
+
+# Behavior for any MAC that isn't listed below.
+defaults:
+  boot: menu   # netboot.xyz interactive menu (the v0.1.3 default)
+
+# Per-machine boot profile.
+# `boot:` is one of: menu, ubuntu-22.04, ubuntu-24.04, debian-12, custom
+# `cloud_init:` is required for the ubuntu/debian autoinstall targets.
+# Relative paths are resolved from this file's directory.
+machines:
+  - mac: 58:47:ca:70:c7:c9
+    name: kube-1
+    boot: ubuntu-22.04
+    cloud_init: ./examples/kube-node.yaml
+
+  - mac: aa:bb:cc:dd:ee:01
+    name: kube-2
+    boot: ubuntu-22.04
+    cloud_init: ./examples/kube-node.yaml
+
+  - mac: aa:bb:cc:dd:ee:02
+    name: db-primary
+    boot: debian-12
+    cloud_init: ./examples/debian-db.yaml
+
+  - mac: 11:22:33:44:55:66
+    name: rescue-jumpbox
+    boot: custom
+    ipxe_script: ./examples/rescue.ipxe

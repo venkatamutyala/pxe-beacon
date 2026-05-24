@@ -26,12 +26,18 @@ type Tracker interface {
 	NoteServed(mac string)
 }
 
+// AutoexecRedirector returns the per-request bytes to serve when a
+// TFTP RRQ asks for "autoexec.ipxe". It's an injection point so the
+// boot package owns the script content; tftp just plumbs it.
+type AutoexecRedirector func() []byte
+
 // Server wraps pin/tftp with our embedded asset handler.
 type Server struct {
-	log     *narrlog.Logger
-	tracker Tracker
-	srv     *pin.Server
-	addr    string
+	log      *narrlog.Logger
+	tracker  Tracker
+	srv      *pin.Server
+	addr     string
+	autoexec AutoexecRedirector
 }
 
 // Options carries the listener config.
@@ -39,6 +45,9 @@ type Options struct {
 	Listen  string // "0.0.0.0:69" or "127.0.0.1:6969" for tests
 	Logger  *narrlog.Logger
 	Tracker Tracker
+	// Autoexec, if set, supplies the autoexec.ipxe content. When
+	// nil, autoexec.ipxe RRQs continue to 404 (the v0.1.x behavior).
+	Autoexec AutoexecRedirector
 }
 
 // New constructs a TFTP server but does not start it.
@@ -50,9 +59,10 @@ func New(o Options) (*Server, error) {
 		o.Listen = "0.0.0.0:69"
 	}
 	s := &Server{
-		log:     o.Logger.With("tftp"),
-		tracker: o.Tracker,
-		addr:    o.Listen,
+		log:      o.Logger.With("tftp"),
+		tracker:  o.Tracker,
+		addr:     o.Listen,
+		autoexec: o.Autoexec,
 	}
 	s.srv = pin.NewServer(s.readHandler, nil) // write disabled
 	return s, nil
@@ -101,17 +111,38 @@ func (s *Server) readHandler(filename string, rf io.ReaderFrom) error {
 		logPath = fmt.Sprintf("%s (leaf=%s)", filename, leaf)
 	}
 
+	// autoexec.ipxe — operator override hook. If we have a
+	// redirector configured (fleet mode), serve it. Otherwise the
+	// legacy 404-as-benign behavior.
+	if leaf == "autoexec.ipxe" {
+		if s.autoexec != nil {
+			body := s.autoexec()
+			s.log.Infof(`TFTP RRQ %q -> serving autoexec redirector (%d bytes)`, filename, len(body))
+			if outSizer, ok := rf.(interface{ SetSize(int64) }); ok {
+				outSizer.SetSize(int64(len(body)))
+			}
+			if _, err := rf.ReadFrom(bytes.NewReader(body)); err != nil {
+				// iPXE's tsize abort pattern, same handling as below.
+				es := err.Error()
+				if strings.Contains(es, "User aborted") || strings.Contains(es, "code=8") {
+					s.log.Debugf("RRQ %q -> client aborted to retry with different options (benign): %v", filename, err)
+				} else {
+					s.log.Errorf("RRQ %q -> transfer error: %v", filename, err)
+				}
+				return err
+			}
+			if s.tracker != nil {
+				s.tracker.NoteServed("tftp-anon")
+			}
+			return nil
+		}
+		s.log.Infof(`(benign: RRQ %q -> 404; no operator override configured, iPXE will use its embedded chain)`, filename)
+		return fmt.Errorf("file not found: %s", filename)
+	}
+
 	kind, ok := kindForLeaf(leaf)
 	if !ok {
-		// Many iPXE builds probe for autoexec.ipxe at startup; a 404
-		// is the expected/benign outcome when no operator override
-		// exists. Log at info level with a benign tag rather than
-		// scaring readers with a warn.
-		if leaf == "autoexec.ipxe" {
-			s.log.Infof(`(benign: RRQ %q -> 404; no operator override configured, iPXE will use its embedded chain)`, filename)
-		} else {
-			s.log.Warnf(`RRQ %q -> 404 (unknown filename; known: netboot.xyz.efi, netboot.xyz-snponly.efi, netboot.xyz-arm64.efi, netboot.xyz.kpxe)`, filename)
-		}
+		s.log.Warnf(`RRQ %q -> 404 (unknown filename; known: netboot.xyz.efi, netboot.xyz-snponly.efi, netboot.xyz-arm64.efi, netboot.xyz.kpxe)`, filename)
 		return fmt.Errorf("file not found: %s", filename)
 	}
 

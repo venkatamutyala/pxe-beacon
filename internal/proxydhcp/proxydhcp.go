@@ -8,6 +8,8 @@ import (
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/iana"
+
+	"github.com/venkatamutyala/pxe-beacon/internal/fleet"
 )
 
 // Config carries the deployment-specific knobs BuildOffer needs. It is
@@ -27,6 +29,17 @@ type Config struct {
 	// iPXE asking for its script, not firmware asking for a binary".
 	// Defaults to "iPXE" if zero.
 	IPXEUserClass string
+	// Fleet provides per-MAC profile lookup so BuildOffer can enrich
+	// the Decision (and the narrated log line) with the operator's
+	// machine name. May be nil — when nil, every MAC is treated as
+	// unknown and gets the v0.1.3 "menu" defaults.
+	//
+	// Note: the OFFER itself does NOT change shape per-MAC in v0.2 —
+	// netboot.xyz's iPXE ignores the OFFER's bootfile and uses its
+	// own embedded chain. Per-MAC dispatch happens via the
+	// autoexec.ipxe HTTP route. Fleet here is for logging + future
+	// non-netboot.xyz iPXE builds that DO honor the OFFER bootfile.
+	Fleet *fleet.Fleet
 }
 
 // defaultUserClass returns the configured iPXE user class, defaulting
@@ -75,6 +88,12 @@ type Decision struct {
 	SkipReason   string // human-readable; benign when SkipKind is SkipNotPXE
 	UnknownArch  bool   // we fell back because option 93 was unrecognized
 	IsIPXEStage  bool   // user-class said "iPXE"
+	// MachineName is the operator-friendly name from fleet.yaml.
+	// Empty when the MAC isn't configured or no fleet is loaded.
+	MachineName string
+	// BootTarget is the fleet-configured boot target ("menu",
+	// "ubuntu-22.04", etc.). Defaults to "menu" for unknown MACs.
+	BootTarget string
 }
 
 // IsBenignSkip reports whether the skip is the expected
@@ -112,6 +131,14 @@ func BuildOffer(req *dhcpv4.DHCPv4, cfg Config) (*dhcpv4.DHCPv4, Decision, error
 		d.UserClass = strings.Join(uc, ",")
 	}
 	d.Archs = req.ClientArch()
+
+	// Resolve the per-MAC fleet profile. Cheap; safe for nil Fleet.
+	d.BootTarget = "menu"
+	if cfg.Fleet != nil {
+		p := cfg.Fleet.Lookup(d.ClientMAC)
+		d.MachineName = p.Name
+		d.BootTarget = p.Boot
+	}
 
 	// We respond to DISCOVER (initial broadcast on 67) and REQUEST
 	// (unicast on 4011 used by some firmware after picking an OFFER).

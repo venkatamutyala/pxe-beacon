@@ -127,6 +127,62 @@ func TestTFTP_AcceptsMACPrefixedPath(t *testing.T) {
 	}
 }
 
+func TestTFTP_AutoexecRedirector(t *testing.T) {
+	// When Options.Autoexec is set, TFTP serves the redirector for
+	// autoexec.ipxe RRQs. Used by fleet mode in v0.2.
+	redirectorBytes := []byte("#!ipxe\nchain http://1.2.3.4:8080/autoinstall/aa-bb/autoexec.ipxe\nexit\n")
+
+	// Pick a port the same way startTestServer does.
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := pc.LocalAddr().String()
+	_ = pc.Close()
+
+	logBuf := &bytes.Buffer{}
+	log := narrlog.New("test", narrlog.LevelDebug, logBuf)
+	s, err := New(Options{
+		Listen:   addr,
+		Logger:   log,
+		Autoexec: func() []byte { return redirectorBytes },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = s.Serve(ctx); close(done) }()
+	time.Sleep(50 * time.Millisecond)
+
+	c, _ := pin.NewClient(addr)
+	c.SetTimeout(2 * time.Second)
+	wt, err := c.Receive("autoexec.ipxe", "octet")
+	if err != nil {
+		t.Fatalf("receive autoexec.ipxe: %v\nlog:\n%s", err, logBuf.String())
+	}
+	var got bytes.Buffer
+	if _, err := wt.WriteTo(&got); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.Bytes(), redirectorBytes) {
+		t.Errorf("autoexec.ipxe content mismatch:\n got: %q\nwant: %q", got.Bytes(), redirectorBytes)
+	}
+}
+
+func TestTFTP_AutoexecWithoutRedirector_404s(t *testing.T) {
+	// When Options.Autoexec is nil, autoexec.ipxe still 404s — this
+	// preserves the v0.1.3 behavior so users who don't pass -config
+	// see no change.
+	addr, _ := startTestServer(t) // startTestServer sets no Autoexec
+	c, _ := pin.NewClient(addr)
+	c.SetTimeout(1 * time.Second)
+	if _, err := c.Receive("autoexec.ipxe", "octet"); err == nil {
+		t.Error("expected 404 for autoexec.ipxe with no redirector configured")
+	}
+}
+
 func TestTFTP_404ForUnknown(t *testing.T) {
 	addr, _ := startTestServer(t)
 	c, _ := pin.NewClient(addr)
