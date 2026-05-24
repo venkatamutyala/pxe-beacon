@@ -1,0 +1,44 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write  # needed by `gh release create` to publish
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # so `git describe` in the Makefile sees tags
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: test
+        run: go test ./...
+
+      - name: cross-compile
+        # `make cross` builds linux/amd64, linux/arm64, darwin/arm64
+        # under dist/ with -ldflags -X main.version=$(git describe ...),
+        # so the binary self-reports the tag at runtime.
+        run: make cross
+
+      - name: checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "pxe-beacon ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/*

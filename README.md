@@ -51,7 +51,22 @@ script chainloads netboot.xyz (or whatever URL you point it at).
 
 ---
 
-## Install / build
+## Install
+
+**Prebuilt binaries** are published on the
+[GitHub Releases page](https://github.com/venkatamutyala/pxe-beacon/releases)
+for `linux-amd64`, `linux-arm64`, and `darwin-arm64`, with a
+`SHA256SUMS` file alongside. Each release is built from a `v*` tag by
+the `release` GitHub Actions workflow.
+
+```bash
+# pick the artifact for your OS/arch
+curl -sSLo pxe-beacon https://github.com/venkatamutyala/pxe-beacon/releases/latest/download/pxe-beacon-linux-amd64
+chmod +x pxe-beacon
+sudo ./pxe-beacon
+```
+
+**Build from source:**
 
 ```bash
 git clone https://github.com/venkatamutyala/pxe-beacon
@@ -63,6 +78,11 @@ make cross            # → dist/pxe-beacon-{linux-amd64,linux-arm64,darwin-arm6
 
 No runtime dependencies; the iPXE binaries are embedded via `go:embed`
 (see `internal/assets/ipxe/VERSIONS.md` for provenance).
+
+To cut a release: tag and push (`git tag v0.1.0 && git push origin v0.1.0`)
+— the `release` workflow runs `go test`, cross-compiles the three
+binaries with the tag stamped into `-version`, computes `SHA256SUMS`,
+and uploads everything to a GitHub Release with auto-generated notes.
 
 ---
 
