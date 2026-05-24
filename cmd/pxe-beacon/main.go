@@ -18,6 +18,7 @@ import (
 	"github.com/venkatamutyala/pxe-beacon/internal/narrlog"
 	"github.com/venkatamutyala/pxe-beacon/internal/netinfo"
 	"github.com/venkatamutyala/pxe-beacon/internal/proxydhcp"
+	tftpd "github.com/venkatamutyala/pxe-beacon/internal/tftp"
 )
 
 // version is overridden via -ldflags at build time.
@@ -32,6 +33,7 @@ func main() {
 		flagChainURL   = flag.String("chain-url", "https://boot.netboot.xyz/menu.ipxe", "URL the iPXE script chainloads")
 		flagIPXEScript = flag.String("ipxe-script", "", "path to a custom boot.ipxe template (overrides embedded default)")
 		flagAdvIP      = flag.String("advertise-ip", "", "override the advertised IPv4 (auto-detect if empty)")
+		flagTFTPListen = flag.String("tftp-listen", "0.0.0.0:69", "TFTP listen address (host:port)")
 		flagPrintVer   = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -104,10 +106,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	errc := make(chan error, 1)
-	go func() {
-		errc <- lst.Serve(ctx)
-	}()
+	tftpSrv, err := tftpd.New(tftpd.Options{
+		Listen:  *flagTFTPListen,
+		Logger:  log,
+		Tracker: lst,
+	})
+	if err != nil {
+		log.Errorf("init tftp: %v", err)
+		os.Exit(1)
+	}
+
+	errc := make(chan error, 2)
+	go func() { errc <- lst.Serve(ctx) }()
+	go func() { errc <- tftpSrv.Serve(ctx) }()
 
 	log.Infof("ready — press Ctrl-C to exit")
 	select {

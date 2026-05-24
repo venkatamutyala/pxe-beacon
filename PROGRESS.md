@@ -132,3 +132,65 @@ Decisions to flag for review:
 - **`internal/proxydhcp/listener.go` cannot bind 67 without root.** As
   expected. Error message hints at the cause.
 
+---
+
+## M2 — TFTP server — **PASS** (Tier 0 + Tier 1)
+
+What I did:
+- `internal/tftp/tftp.go`: pin/tftp-backed server. `readHandler`
+  resolves a requested path to one of the embedded netboot.xyz binaries
+  via `kindForLeaf`. Both flat ("netboot.xyz.efi") and MAC-prefixed
+  ("aa:bb:cc:dd:ee:ff/netboot.xyz.efi") path forms are accepted, plus
+  the conventional aliases (`ipxe.efi`, `undionly.kpxe`). Path scheme
+  is documented in the file's package comment.
+- Unknown filenames produce a warn-level "404" log naming the path
+  requested *and* the known names (PLAN section 4: "404s loudly with
+  the path requested").
+- Calls `tracker.NoteServed(...)` so the proxyDHCP "client never
+  fetched" hint timer clears once *something* has been served.
+- Wired into `cmd/pxe-beacon/main.go` alongside the proxyDHCP listener.
+  `-tftp-listen` flag added (default `0.0.0.0:69`).
+
+Gate verification:
+
+Tier 0 (unit tests, in-process pin/tftp client against the server):
+
+```
+=== RUN   TestTFTP_ServesEmbeddedEFI         PASS  (0.15s)
+=== RUN   TestTFTP_AcceptsAliasFilename      PASS  (0.14s)
+=== RUN   TestTFTP_AcceptsMACPrefixedPath    PASS  (0.14s)
+=== RUN   TestTFTP_404ForUnknown             PASS  (0.05s)
+PASS    github.com/venkatamutyala/pxe-beacon/internal/tftp
+```
+
+Tier 1 (system `tftp` client; PLAN's primary M2 gate):
+
+```
+$ sudo /tmp/pxe-beacon -tftp-listen 127.0.0.1:6969 -advertise-ip 127.0.0.1 -listen 127.0.0.1 &
+$ tftp 127.0.0.1 6969 -c get netboot.xyz.efi /tmp/netboot.xyz.efi
+$ md5sum /tmp/netboot.xyz.efi internal/assets/ipxe/netboot.xyz.efi
+  9dc2e1a7499c0bdd7405f80732f69167  /tmp/netboot.xyz.efi
+  9dc2e1a7499c0bdd7405f80732f69167  internal/assets/ipxe/netboot.xyz.efi
+```
+
+Server log:
+
+```
+tftp      listening on 127.0.0.1:6969
+tftp      TFTP RRQ/GET "netboot.xyz.efi" -> serving netboot.xyz.efi (1171456 bytes)
+tftp      TFTP RRQ "netboot.xyz.efi" -> served netboot.xyz.efi (1171456 bytes) ok
+```
+
+Decisions to flag for review:
+- **`pin/tftp.sender.ReadFrom` reports an inflated byte count** when
+  blocksize OACK/tsize is negotiated. The actual file bytes are correct
+  (md5 matches). I dropped a misleading "short send" warning that the
+  inflated count was producing — the success path is now error-only.
+- **Path scheme: accept both flat and MAC-prefixed.** Documented in
+  `internal/tftp/tftp.go`. v1 ignores the MAC; per-host overlays are
+  Phase 2 territory.
+- **`NoteServed` uses an opaque "tftp-anon" tag.** TFTP RRQ doesn't
+  carry the client MAC, so we can't clear per-MAC pending OFFERs
+  yet. Good enough to silence the failure-path hint when any TFTP
+  follow-up arrives.
+
