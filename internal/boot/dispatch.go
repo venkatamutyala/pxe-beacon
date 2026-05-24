@@ -40,20 +40,22 @@ func RenderDispatch(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w := func(s string) { buf.WriteString(s); buf.WriteByte('\n') }
 
 	w("#!ipxe")
-	// v0.5.7: probes are FIRST — before banner echoes, before any
-	// variable substitution. v0.5.6 didn't see either HTTP or TFTP
-	// probes hit pxe-beacon despite the matched arm running ~5s
-	// later; strong signal that the script was aborting before the
-	// probes (banner echoes use ${net1/mac:hexhyp} on a NIC that
-	// probably doesn't exist, and some iPXE builds bail on
-	// undefined-variable refs). The two minimal probes here use NO
-	// variables — pure literal URLs. If neither hits the server,
-	// iPXE isn't running our script at all and embed.ipxe is taking
-	// over (next debug step: examine TFTP-of-autoexec sequence).
+	// v0.5.8: explicit dhcp BEFORE the probes. v0.5.7 put probes at
+	// the very top but neither HTTP nor TFTP probes hit pxe-beacon —
+	// strong signal that iPXE's TCP/IP stack has NO network state at
+	// script-start. The snponly UEFI build apparently doesn't carry
+	// the firmware DHCP lease into iPXE's own stack. iPXE-stage DHCP
+	// in the earlier logs was actually the matched arm's `dhcp`
+	// firing 5s into the script, AFTER the probes silently failed.
+	//
+	// Now: explicit dhcp at line 2, THEN probes. If probes hit after
+	// this dhcp, iPXE is running our script all along; the only
+	// missing piece is dhcp ordering.
 	addr := fmt.Sprintf("%s:%d", ctx.AdvertisedIP, ctx.HTTPPort)
-	fmt.Fprintf(&buf, "chain --autofree tftp://%s/probe/script-started ||\n", ctx.AdvertisedIP)
+	w("dhcp || echo DHCP_BEFORE_PROBES_FAILED")
+	fmt.Fprintf(&buf, "chain --autofree tftp://%s/probe/after-dhcp ||\n", ctx.AdvertisedIP)
 	w("echo TFTP_PROBE_FAILED")
-	fmt.Fprintf(&buf, "chain --autofree http://%s/debug/probe/script-started ||\n", addr)
+	fmt.Fprintf(&buf, "chain --autofree http://%s/debug/probe/after-dhcp ||\n", addr)
 	w("echo HTTP_PROBE_FAILED")
 	w("")
 	w("# pxe-beacon dispatch — generated per request from fleet.yaml.")

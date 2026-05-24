@@ -56,12 +56,13 @@ machines:
 	for _, want := range []string{
 		// Dispatch line for the user's MAC.
 		"iseq ${net0/mac:hexhyp} 58-47-ca-70-c7-c9 && goto m_venkat-1",
-		// v0.5.7: simplest possible probes at the TOP of the script
-		// (no variable substitution, no banner echoes first).
+		// v0.5.8: explicit dhcp before probes, since iPXE doesn't
+		// inherit firmware DHCP state into its own stack on snponly.
+		"dhcp || echo DHCP_BEFORE_PROBES_FAILED",
 		"chain --autofree http://",
-		"/debug/probe/script-started",
+		"/debug/probe/after-dhcp",
 		"chain --autofree tftp://",
-		"/probe/script-started",
+		"/probe/after-dhcp",
 		// Per-machine block label.
 		":m_venkat-1",
 		// dhcp inside the arm (PXE expert fix #1).
