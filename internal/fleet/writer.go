@@ -66,6 +66,7 @@ func (f *Fleet) Save() error {
 			Boot:       f.defaults.Boot,
 			CloudInit:  relativize(f.baseDir, f.defaults.CloudInit),
 			Preseed:    relativize(f.baseDir, f.defaults.Preseed),
+			Kickstart:  relativize(f.baseDir, f.defaults.Kickstart),
 			IPXEScript: relativize(f.baseDir, f.defaults.IPXEScript),
 		},
 	}
@@ -76,6 +77,7 @@ func (f *Fleet) Save() error {
 			Boot:       p.Boot,
 			CloudInit:  relativize(f.baseDir, p.CloudInit),
 			Preseed:    relativize(f.baseDir, p.Preseed),
+			Kickstart:  relativize(f.baseDir, p.Kickstart),
 			IPXEScript: relativize(f.baseDir, p.IPXEScript),
 		})
 	}

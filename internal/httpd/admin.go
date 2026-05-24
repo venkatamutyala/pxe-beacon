@@ -133,6 +133,7 @@ func (s *Server) handleAdminFleetSave(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(r.FormValue("name"))
 	boot := strings.TrimSpace(r.FormValue("boot"))
 	preseed := strings.TrimSpace(r.FormValue("preseed"))
+	kickstart := strings.TrimSpace(r.FormValue("kickstart"))
 	cloudInit := strings.TrimSpace(r.FormValue("cloud_init"))
 	ipxeScript := strings.TrimSpace(r.FormValue("ipxe_script"))
 
@@ -161,6 +162,7 @@ func (s *Server) handleAdminFleetSave(w http.ResponseWriter, r *http.Request) {
 			Name:       name,
 			Boot:       boot,
 			Preseed:    resolvePath(preseed),
+			Kickstart:  resolvePath(kickstart),
 			CloudInit:  resolvePath(cloudInit),
 			IPXEScript: resolvePath(ipxeScript),
 		},

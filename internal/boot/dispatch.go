@@ -67,7 +67,7 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("# the boot story unfold.")
 	w("")
 	w("echo ============================================================")
-	w("echo  pxe-beacon dispatch (v0.6.6) — verbose + server-side logging")
+	w("echo  pxe-beacon dispatch (v0.6.7) — Rocky 9 + AlmaLinux 9 support")
 	w("echo ============================================================")
 	w("echo")
 	w("echo [stage 0/5] iPXE settings BEFORE dhcp")
@@ -324,6 +324,40 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching initrd: %s/initrd.gz\n", mirror)
 		fmt.Fprintf(buf, "initrd --name initrd.gz %s/initrd.gz || goto %s_fail_initrd\n", mirror, label)
 		w("echo pxe-beacon: handing control to d-i (boot)...")
+		fmt.Fprintf(buf, "boot || goto %s_fail_boot\n", label)
+		writeMachineErrorBlocks(buf, label, m.Profile.Boot, mirror)
+
+	case "rocky-9", "alma-9":
+		// v0.6.7: RHEL-family unattended install via Anaconda + Kickstart.
+		// Kernel + initrd hosted by the distro's official PXE-boot tree.
+		// `inst.ks=` points Anaconda at our /autoinstall/<mac>/kickstart.cfg.
+		// `inst.repo=` tells Anaconda where to pull packages — same
+		// BaseOS URL as the kernel/initrd source.
+		var (
+			mirror   string
+			repoBase string
+			label2   string // human label for echoes
+		)
+		if m.Profile.Boot == "rocky-9" {
+			mirror = "https://download.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os/images/pxeboot"
+			repoBase = "https://download.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os"
+			label2 = "Rocky Linux 9"
+		} else {
+			mirror = "https://repo.almalinux.org/almalinux/9/BaseOS/x86_64/os/images/pxeboot"
+			repoBase = "https://repo.almalinux.org/almalinux/9/BaseOS/x86_64/os"
+			label2 = "AlmaLinux 9"
+		}
+		kickstartURL := fmt.Sprintf("http://%s:%d/autoinstall/%s/kickstart.cfg",
+			ctx.AdvertisedIP, ctx.HTTPPort,
+			strings.ReplaceAll(m.MAC, ":", "-"))
+		fmt.Fprintf(buf, "echo pxe-beacon: ip=${ip} gw=${gateway} dns=${dns}\n")
+		fmt.Fprintf(buf, "echo pxe-beacon: fetching %s kernel: %s/vmlinuz\n", label2, mirror)
+		fmt.Fprintf(buf,
+			"kernel --name vmlinuz %s/vmlinuz initrd=initrd.img inst.repo=%s inst.ks=%s %s %s --- || goto %s_fail_kernel\n",
+			mirror, repoBase, kickstartURL, ipArg, consoleArgs, label)
+		fmt.Fprintf(buf, "echo pxe-beacon: fetching %s initrd: %s/initrd.img\n", label2, mirror)
+		fmt.Fprintf(buf, "initrd --name initrd.img %s/initrd.img || goto %s_fail_initrd\n", mirror, label)
+		fmt.Fprintf(buf, "echo pxe-beacon: handing control to Anaconda (boot)...\n")
 		fmt.Fprintf(buf, "boot || goto %s_fail_boot\n", label)
 		writeMachineErrorBlocks(buf, label, m.Profile.Boot, mirror)
 

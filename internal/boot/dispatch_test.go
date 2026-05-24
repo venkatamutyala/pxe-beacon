@@ -158,6 +158,51 @@ machines:
 	}
 }
 
+func TestDispatch_Rocky9_Alma9(t *testing.T) {
+	// v0.6.7: rocky-9 and alma-9 boot targets emit Anaconda+Kickstart
+	// kernel cmdlines with inst.repo + inst.ks pointing at the
+	// per-MAC /autoinstall/<mac>/kickstart.cfg route.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fleet.yaml"), []byte(`
+machines:
+  - mac: aa:bb:cc:dd:ee:01
+    name: rocky-host
+    boot: rocky-9
+  - mac: aa:bb:cc:dd:ee:02
+    name: alma-host
+    boot: alma-9
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := fleet.Load(filepath.Join(dir, "fleet.yaml"), narrlog.New("test", narrlog.LevelDebug, nil))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	out := RenderDispatch(f, dispatchCtx())
+	s := string(out)
+
+	cases := []struct{ name, want string }{
+		{"rocky-9 mirror", "download.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os/images/pxeboot"},
+		{"rocky-9 inst.repo", "inst.repo=https://download.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os"},
+		{"rocky-9 inst.ks", "inst.ks=http://10.69.69.218:8080/autoinstall/aa-bb-cc-dd-ee-01/kickstart.cfg"},
+		{"alma-9 mirror", "repo.almalinux.org/almalinux/9/BaseOS/x86_64/os/images/pxeboot"},
+		{"alma-9 inst.repo", "inst.repo=https://repo.almalinux.org/almalinux/9/BaseOS/x86_64/os"},
+		{"alma-9 inst.ks", "inst.ks=http://10.69.69.218:8080/autoinstall/aa-bb-cc-dd-ee-02/kickstart.cfg"},
+		{"rocky-9 fleet entry", "iseq ${net0/mac:hexhyp} aa-bb-cc-dd-ee-01 && goto m_rocky_host"},
+		{"alma-9 fleet entry", "iseq ${net0/mac:hexhyp} aa-bb-cc-dd-ee-02 && goto m_alma_host"},
+	}
+	for _, c := range cases {
+		if !strings.Contains(s, c.want) {
+			t.Errorf("%s — missing %q:\n%s", c.name, c.want, s)
+		}
+	}
+	for _, c := range cases {
+		if !strings.Contains(s, c.want) {
+			t.Errorf("%s — missing %q:\n%s", c.name, c.want, s)
+		}
+	}
+}
+
 func TestDispatch_LabelOf_Sanitizes(t *testing.T) {
 	// v0.5.15: labels are [a-zA-Z0-9_] only. Hyphens, dots, slashes,
 	// spaces, etc. all become '_'. (iPXE's goto silently no-ops on

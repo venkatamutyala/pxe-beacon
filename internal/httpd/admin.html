@@ -98,11 +98,16 @@
     <option value="debian-13">debian-13 — unattended d-i (Trixie)</option>
     <option value="ubuntu-22.04">ubuntu-22.04 — Subiquity (requires fetch)</option>
     <option value="ubuntu-24.04">ubuntu-24.04 — Subiquity (requires fetch)</option>
+    <option value="rocky-9">rocky-9 — unattended Anaconda + Kickstart</option>
+    <option value="alma-9">alma-9 — unattended Anaconda + Kickstart</option>
     <option value="custom">custom — ipxe_script required</option>
   </select>
 
   <label for="preseed">preseed</label>
   <input id="preseed" name="preseed" type="text" placeholder="(empty = embedded default for debian-*)">
+
+  <label for="kickstart">kickstart</label>
+  <input id="kickstart" name="kickstart" type="text" placeholder="(empty = embedded default for rocky-9 / alma-9)">
 
   <label for="cloud_init">cloud_init</label>
   <input id="cloud_init" name="cloud_init" type="text" placeholder="(empty = embedded default with phone_home)">

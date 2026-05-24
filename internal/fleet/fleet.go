@@ -33,6 +33,8 @@ var ValidBootTargets = map[string]bool{
 	"ubuntu-24.04": true,
 	"debian-12":    true,
 	"debian-13":    true,
+	"rocky-9":      true, // v0.6.7+: Rocky Linux 9 via Kickstart
+	"alma-9":       true, // v0.6.7+: AlmaLinux 9 via Kickstart
 	"custom":       true,
 }
 
@@ -67,6 +69,13 @@ type Profile struct {
 	// Ubuntu / menu / custom.
 	Preseed string
 
+	// Kickstart is an absolute path to a RHEL-family kickstart.cfg.
+	// Used for rocky-9 / alma-9 unattended installs (Anaconda). The
+	// embedded default kickstart seeds cloud-init NoCloud datasource
+	// in %post so the installed system phones home + accepts further
+	// config on first boot. Empty for non-RHEL targets.
+	Kickstart string
+
 	// IPXEScript is an absolute path to the raw iPXE script the
 	// operator wants served verbatim. Only meaningful when
 	// boot==custom; empty otherwise.
@@ -87,6 +96,7 @@ type defaultsEntry struct {
 	Boot       string `yaml:"boot"`
 	CloudInit  string `yaml:"cloud_init"`
 	Preseed    string `yaml:"preseed"`
+	Kickstart  string `yaml:"kickstart"`
 	IPXEScript string `yaml:"ipxe_script"`
 }
 
@@ -96,6 +106,7 @@ type machineYAML struct {
 	Boot       string `yaml:"boot"`
 	CloudInit  string `yaml:"cloud_init"`
 	Preseed    string `yaml:"preseed"`
+	Kickstart  string `yaml:"kickstart"`
 	IPXEScript string `yaml:"ipxe_script"`
 }
 
@@ -182,6 +193,7 @@ func (f *Fleet) reload() error {
 		Boot:       cfg.Defaults.Boot,
 		CloudInit:  resolvePath(baseDir, cfg.Defaults.CloudInit),
 		Preseed:    resolvePath(baseDir, cfg.Defaults.Preseed),
+		Kickstart:  resolvePath(baseDir, cfg.Defaults.Kickstart),
 		IPXEScript: resolvePath(baseDir, cfg.Defaults.IPXEScript),
 		IsDefault:  true,
 	}
@@ -214,6 +226,7 @@ func (f *Fleet) reload() error {
 			Name:       m.Name,
 			CloudInit:  resolvePath(baseDir, m.CloudInit),
 			Preseed:    resolvePath(baseDir, m.Preseed),
+			Kickstart:  resolvePath(baseDir, m.Kickstart),
 			IPXEScript: resolvePath(baseDir, m.IPXEScript),
 		}
 		if err := validateProfile(p, ctx); err != nil {
@@ -279,6 +292,22 @@ func validateProfile(p Profile, ctx string) error {
 		if p.Preseed != "" {
 			if _, err := os.Stat(p.Preseed); err != nil {
 				return fmt.Errorf("%s: preseed %s: %w", ctx, p.Preseed, err)
+			}
+		}
+		if p.CloudInit != "" {
+			if _, err := os.Stat(p.CloudInit); err != nil {
+				return fmt.Errorf("%s: cloud_init %s: %w", ctx, p.CloudInit, err)
+			}
+		}
+	case "rocky-9", "alma-9":
+		// v0.6.7: Rocky/Alma 9 via Anaconda + Kickstart. Like the
+		// debian-* targets, the kickstart is OPTIONAL — when omitted
+		// we serve the embedded default (pxe/pxe user + cloud-init
+		// seeded in %post). Cloud_init is bridged into the
+		// installed system the same way.
+		if p.Kickstart != "" {
+			if _, err := os.Stat(p.Kickstart); err != nil {
+				return fmt.Errorf("%s: kickstart %s: %w", ctx, p.Kickstart, err)
 			}
 		}
 		if p.CloudInit != "" {

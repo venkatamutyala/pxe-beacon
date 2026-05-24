@@ -20,6 +20,7 @@ import (
 //go:embed scripts/autoexec/debian-12.ipxe
 //go:embed scripts/autoexec/debian-13.ipxe
 //go:embed scripts/defaults/debian-preseed.cfg
+//go:embed scripts/defaults/rhel-kickstart.cfg
 //go:embed scripts/defaults/cloud-init.yaml
 var fsys embed.FS
 

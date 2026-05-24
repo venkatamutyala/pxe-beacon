@@ -195,6 +195,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /autoinstall/{mac}/user-data", s.handleUserData)
 	s.mux.HandleFunc("GET /autoinstall/{mac}/meta-data", s.handleMetaData)
 	s.mux.HandleFunc("GET /autoinstall/{mac}/preseed.cfg", s.handlePreseed)
+	s.mux.HandleFunc("GET /autoinstall/{mac}/kickstart.cfg", s.handleKickstart)
 	s.mux.HandleFunc("POST /autoinstall/{mac}/done", s.handleInstallerDone)
 	s.mux.HandleFunc("GET /status", s.handleStatusHTML)
 	s.mux.HandleFunc("GET /status.json", s.handleStatusJSON)
@@ -473,6 +474,103 @@ func (s *Server) handlePreseed(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Infof("GET %s -> 200, %d bytes [client=%s, preseed=%t, cloud_init_bridge=%t]",
 		r.URL.Path, len(body), labelOf(p.Name, mac), p.Preseed != "", p.Preseed != "" && p.CloudInit != "")
+}
+
+// handleKickstart serves a RHEL-family kickstart.cfg for the requesting
+// MAC. Used by rocky-9 / alma-9 boot targets — Anaconda's equivalent
+// of Debian's preseed.cfg.
+//
+// Three cases mirror handlePreseed:
+//  1. fleet entry has `kickstart:` set → template + serve that file.
+//  2. fleet entry has boot rocky-9 / alma-9 (no kickstart) → embedded
+//     default with user pxe / password pxe, cloud-init seeded in %post.
+//  3. neither → "no kickstart configured" stub (Anaconda goes
+//     interactive).
+//
+// Template vars are the same as handlePreseed PLUS RepoBaseURL — the
+// distro-specific BaseOS URL (Rocky vs Alma) is selected per fleet
+// entry's boot target.
+func (s *Server) handleKickstart(w http.ResponseWriter, r *http.Request) {
+	if !s.fleetReady(w) {
+		return
+	}
+	mac := s.extractMAC(w, r)
+	if mac == "" {
+		return
+	}
+	p := s.opts.Fleet.Lookup(mac)
+
+	repoBase := ""
+	switch p.Boot {
+	case "rocky-9":
+		repoBase = "https://download.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os"
+	case "alma-9":
+		repoBase = "https://repo.almalinux.org/almalinux/9/BaseOS/x86_64/os"
+	}
+
+	tvars := map[string]any{
+		"Name":             p.Name,
+		"MAC":              mac,
+		"MACHyp":           strings.ReplaceAll(mac, ":", "-"),
+		"AdvertisedIP":     s.opts.AdvertisedIP,
+		"HTTPPort":         s.opts.HTTPPort,
+		"ClientNetmask":    s.opts.ClientNetmask,
+		"WiderNetworkCIDR": widerNetworkCIDR(s.opts.AdvertisedIP, s.opts.ClientNetmask),
+		"RepoBaseURL":      repoBase,
+	}
+
+	var body []byte
+	var raw []byte
+	var rerr error
+	switch {
+	case p.Kickstart != "":
+		raw, rerr = os.ReadFile(p.Kickstart)
+		if rerr != nil {
+			s.log.Errorf("GET %s -> 500 read kickstart: %v", r.URL.Path, rerr)
+			http.Error(w, fmt.Sprintf("read kickstart: %v", rerr), http.StatusInternalServerError)
+			return
+		}
+	case p.Boot == "rocky-9" || p.Boot == "alma-9":
+		raw, rerr = assets.ReadDefault("rhel-kickstart.cfg")
+		if rerr != nil {
+			s.log.Errorf("GET %s -> 500 read default kickstart: %v", r.URL.Path, rerr)
+			http.Error(w, fmt.Sprintf("default kickstart: %v", rerr), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if raw != nil {
+		// Template funcs — `replace` is used in the kickstart to derive
+		// AppStream URL from BaseOS URL.
+		funcs := template.FuncMap{
+			"replace": func(old, new, s string) string { return strings.ReplaceAll(s, old, new) },
+		}
+		tmpl, err := template.New("kickstart").Funcs(funcs).Parse(string(raw))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("parse kickstart template: %v", err), http.StatusInternalServerError)
+			return
+		}
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, tvars); err != nil {
+			http.Error(w, fmt.Sprintf("render kickstart: %v", err), http.StatusInternalServerError)
+			return
+		}
+		body = buf.Bytes()
+	} else {
+		body = []byte(`# pxe-beacon: no kickstart configured for ` + mac + `
+# (boot=` + p.Boot + `). For unattended Rocky/Alma install, set
+# ` + "`boot: rocky-9`" + ` or ` + "`boot: alma-9`" + ` in fleet.yaml.
+`)
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	_, _ = w.Write(body)
+	if s.opts.FleetStatus != nil {
+		s.opts.FleetStatus.Note(mac, fleet.EventUserDataFetched)
+	}
+	s.log.Infof("GET %s -> 200, %d bytes [client=%s, kickstart=%t]",
+		r.URL.Path, len(body), labelOf(p.Name, mac), p.Kickstart != "")
 }
 
 // renderCloudInitBridge produces the late_command directive that
