@@ -436,3 +436,42 @@ linux/arm64, darwin/arm64 all succeed.
 
 **Hand-off:** start at `RUN.md` Path A to drive the QEMU+OVMF boot.
 
+---
+
+## v0.1.2 — DHCP REQUEST→ACK fix (wire-observed iPXE BINL drop)
+
+A user PXE-booting an AMI/Phoenix client through v0.1.1 captured a
+tcpdump showing iPXE silently dropping our replies during the
+iPXE-stage BINL exchange and retrying the same `DHCPREQUEST` to
+udp/4011 six times before giving up. Wire evidence:
+
+```
+19:01:21.240306  10.69.7.217.68 > 10.69.69.218.4011: BOOTP/DHCP, Request ...
+19:01:21.240781  10.69.69.218.4011 > 10.69.7.217.68: BOOTP/DHCP, Reply
+                   DHCP-Message: Offer            ← BUG: should be Ack
+                   BF: "http://10.69.69.218:8080/boot.ipxe"
+```
+
+(Repeated 6 times at 21.553, 21.965, 22.987, etc.)
+
+**Root cause:** `BuildOffer` hard-coded `WithMessageType(MessageTypeOffer)`
+regardless of the request's own message type. UEFI firmware tolerates
+the wrong type (so v0.1.1 worked end-to-end through TFTP+iPXE-boot on
+that user's hardware), but strict iPXE drops `OFFER` replies to its
+`REQUEST` per the DHCP state machine. The user's actual stuck-boot
+symptom was a firmware USB-keyboard bug (`PLAN.md` section 0), not this
+— but the protocol error is real and would break stricter clients.
+
+**Fix:** `internal/proxydhcp/proxydhcp.go` now mirrors the request
+state — `DISCOVER → OFFER`, `REQUEST → ACK`. The comment in the code
+preserves the iPXE-BINL motivation so future readers don't undo it.
+
+**Tests added in `internal/proxydhcp/proxydhcp_test.go`:**
+- `TestBuildOffer_RequestRepliesACK` — synthetic iPXE BINL request,
+  asserts reply is `MessageTypeAck` with the script URL.
+- `TestBuildOffer_DiscoverStillRepliesOFFER` — guards the DISCOVER
+  path against future churn.
+
+Full suite passes (`go test ./...`, 14 unit + 2 e2e in proxydhcp).
+Tagged and released via the existing GitHub Actions release workflow.
+

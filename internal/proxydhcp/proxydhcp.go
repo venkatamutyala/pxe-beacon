@@ -143,12 +143,19 @@ func BuildOffer(req *dhcpv4.DHCPv4, cfg Config) (*dhcpv4.DHCPv4, Decision, error
 	// chainload loop the PLAN warns about.
 	d.IsIPXEStage = userClassContains(req.UserClass(), cfg.defaultUserClass())
 
-	// Build the base reply: copy XID, hardware addr, etc.; set
-	// message type OFFER, server-identifier, and (for proxyDHCP) the
-	// PXEClient class so the firmware recognizes us as the boot
-	// instructor.
+	// Build the base reply: copy XID, hardware addr, etc.; mirror the
+	// request's DHCP state — DISCOVER → OFFER, REQUEST → ACK. UEFI
+	// firmware tolerates either, but strict iPXE clients drop our
+	// reply silently if we OFFER in response to their REQUEST (seen
+	// on the wire: iPXE retries 6× then gives up). We also send the
+	// server-identifier and (for proxyDHCP) the PXEClient class so
+	// the client recognizes us as the boot instructor.
+	replyMT := dhcpv4.MessageTypeOffer
+	if mt == dhcpv4.MessageTypeRequest {
+		replyMT = dhcpv4.MessageTypeAck
+	}
 	reply, err := dhcpv4.NewReplyFromRequest(req,
-		dhcpv4.WithMessageType(dhcpv4.MessageTypeOffer),
+		dhcpv4.WithMessageType(replyMT),
 		dhcpv4.WithOption(dhcpv4.OptServerIdentifier(cfg.AdvertisedIP.To4())),
 		dhcpv4.WithOption(dhcpv4.OptClassIdentifier("PXEClient")),
 	)

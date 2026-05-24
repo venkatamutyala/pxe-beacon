@@ -297,6 +297,59 @@ func TestBuildOffer_PureFunction_NoSideEffectOnRequest(t *testing.T) {
 	}
 }
 
+// TestBuildOffer_RequestRepliesACK is the regression for the iPXE BINL
+// stuck-loop seen in the wild: iPXE sends a unicast DHCPREQUEST to
+// udp/4011 with our Server-ID, expecting a DHCPACK. We were replying
+// with DHCPOFFER, which iPXE silently dropped. UEFI firmware tolerated
+// the wrong type during the firmware stage, but iPXE didn't.
+func TestBuildOffer_RequestRepliesACK(t *testing.T) {
+	hw, _ := net.ParseMAC("58:47:ca:70:c7:c9")
+	req, err := dhcpv4.New(
+		dhcpv4.WithMessageType(dhcpv4.MessageTypeRequest),
+		dhcpv4.WithHwAddr(hw),
+		dhcpv4.WithOption(dhcpv4.OptClassIdentifier("PXEClient:Arch:00007:UNDI:003010")),
+		dhcpv4.WithOption(dhcpv4.OptGeneric(
+			dhcpv4.OptionClientSystemArchitectureType,
+			iana.Archs{iana.EFI_X86_64}.ToBytes(),
+		)),
+		dhcpv4.WithUserClass("iPXE", false),
+		// Mirror the wire-captured iPXE BINL REQUEST: Server-ID set
+		// to our advertised IP.
+		dhcpv4.WithOption(dhcpv4.OptServerIdentifier(net.ParseIP("10.0.0.5").To4())),
+	)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	reply, dec, err := BuildOffer(req, defaultCfg())
+	if err != nil {
+		t.Fatalf("BuildOffer: %v", err)
+	}
+	if got := reply.MessageType(); got != dhcpv4.MessageTypeAck {
+		t.Errorf("reply msg type = %s, want ACK (iPXE BINL drops OFFER replies to REQUEST)", got)
+	}
+	if dec.Stage != StageIPXEScript {
+		t.Errorf("stage = %q, want %q", dec.Stage, StageIPXEScript)
+	}
+	wantURL := "http://10.0.0.5:8080/boot.ipxe"
+	if reply.BootFileName != wantURL {
+		t.Errorf("bootfile = %q, want %q", reply.BootFileName, wantURL)
+	}
+}
+
+// TestBuildOffer_DiscoverStillRepliesOFFER ensures the fix above didn't
+// regress the DISCOVER path.
+func TestBuildOffer_DiscoverStillRepliesOFFER(t *testing.T) {
+	req := newDiscover(t, "58:47:ca:70:c7:c9", iana.EFI_X86_64, "PXEClient", "")
+	reply, _, err := BuildOffer(req, defaultCfg())
+	if err != nil {
+		t.Fatalf("BuildOffer: %v", err)
+	}
+	if got := reply.MessageType(); got != dhcpv4.MessageTypeOffer {
+		t.Errorf("reply msg type = %s, want OFFER", got)
+	}
+}
+
 func TestBuildOffer_RejectsBadConfig(t *testing.T) {
 	req := newDiscover(t, "00:00:00:00:00:03", iana.EFI_X86_64, "PXEClient", "")
 	// missing AdvertisedIP
