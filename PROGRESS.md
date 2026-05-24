@@ -272,3 +272,74 @@ Decisions to flag for review:
   expanded values inside the comment block. Tidied the template so
   comments are just comments.
 
+---
+
+## M4 — End-to-end wiring + real boot prep — **CODE READY; HARDWARE GATE BLOCKED**
+
+What I did:
+- Verified all three servers (proxyDHCP UDP/67+4011, TFTP UDP/69, HTTP
+  TCP/8080) run as goroutines under one shared `signal.NotifyContext`,
+  bind cleanly, and serve concurrently from the same binary.
+- Added optional `Port67`/`Port4011`/`BroadcastReply` to listener
+  ServerOptions so synthetic-client tests can use high ports without
+  root and read unicast replies on loopback. Production defaults
+  (67/4011/broadcast=true) are unchanged.
+- Wrote two **end-to-end socket-path tests** (`listener_e2e_test.go`)
+  that craft a real DISCOVER over UDP loopback, send it to the
+  listener, parse the OFFER bytes, and assert: the OFFER fields are
+  correct, the YIADDR is zero (proxyDHCP MUST NOT assign IPs), and
+  the narrated log contains the expected `stage=firmware-TFTP` /
+  `stage=iPXE-script` lines. These are the PLAN's "optional
+  synthetic DHCP client" sanity check — I added them because they
+  catch socket bugs the pure tests miss.
+- Wrote `RUN.md`:
+  - Quick-start + flags.
+  - Three M4 validation paths: QEMU+OVMF on Linux (preferred), real
+    hardware, UEFI HTTP boot.
+  - `tcpdump` lens with the expected 5-step sequence.
+  - Loopback / Tier-1 smoke commands operators can run today.
+  - Troubleshooting table mapping PLAN section 0 gotchas to symptoms.
+
+Gate verification (the parts I can do here):
+
+```
+go build ./...          # clean
+go test ./...           # all pass:
+  httpd       5 tests
+  proxydhcp   14 tests (12 unit + 2 e2e)
+  tftp        4 tests
+```
+
+Live three-server smoke:
+
+```
+proxydhcp listening on udp/67 (DHCP) and udp/4011 (PXE BINL), interface="enp1s0" advertise=127.0.0.1
+tftp      listening on 127.0.0.1:6969
+http      listening on 127.0.0.1:8080 (script path /boot.ipxe)
+tftp      TFTP RRQ "netboot.xyz.efi" -> served netboot.xyz.efi (1171456 bytes) ok
+http      GET /boot.ipxe -> 200, 415 bytes
+```
+
+ss(1) confirms all four sockets bound:
+
+```
+UNCONN ... 127.0.0.1%enp1s0:67   pxe-beacon
+UNCONN ... 127.0.0.1%enp1s0:4011 pxe-beacon
+UNCONN ... 127.0.0.1:6969        pxe-beacon
+LISTEN ... 127.0.0.1:8080        pxe-beacon  (via Serve TCP)
+```
+
+**M4 PLAN gate is "a UEFI client boots through to the netboot.xyz menu
+with no other config" — that requires hardware/VM I do not have in this
+environment. The code is wired and ready; see `RUN.md` Path A (QEMU+
+OVMF) and Path B (real hardware) for the exact commands.**
+
+Decisions to flag for review:
+- **`-interface enp1s0` is auto-selected in this sandbox**, but that
+  interface is a virtual NIC with `192.168.122.107` — it cannot actually
+  PXE-boot a hardware client. The PLAN gate must be re-run on real
+  hardware or a VM bridged to a network with a real DHCP server.
+- The synthetic-client e2e tests verify the OFFER bytes are correct
+  on the wire; the only thing they don't prove is that UEFI firmware
+  accepts those bytes. That's a hardware question, not a code one.
+

@@ -14,18 +14,25 @@ import (
 
 // ServerOptions wires the listener to the rest of the program.
 type ServerOptions struct {
-	Interface string  // "" means "any"
-	ListenIP  string  // e.g. "0.0.0.0"
-	Config    Config  // BuildOffer config
-	Logger    *narrlog.Logger
+	Interface string // "" means "any"
+	ListenIP  string // e.g. "0.0.0.0"
+	// Port67 / Port4011 default to 67 and 4011. Tests override to
+	// avoid needing root; in production these stay at the
+	// well-known values clients send to.
+	Port67   int
+	Port4011 int
+	Config   Config // BuildOffer config
+	Logger   *narrlog.Logger
 	// FollowUpTimeout sets how long after sending an OFFER we wait
 	// before logging the "client never fetched" hint if no
 	// corresponding TFTP/HTTP fetch was observed. PLAN section 4
 	// requires this failure-path hint. Zero disables.
 	FollowUpTimeout time.Duration
-	// NotifyServed lets external servers (TFTP, HTTP) tell us a
-	// client has fetched something so we cancel the hint timer.
-	// Listener constructs this; callers retrieve it via OfferTracker.
+	// BroadcastReply controls whether OFFERs to port-67 senders are
+	// sent to 255.255.255.255:68. Default true; tests with synthetic
+	// clients on loopback set false so we reply unicast to the peer
+	// and don't need to capture broadcast traffic.
+	BroadcastReply *bool
 }
 
 // OfferTracker lets the TFTP and HTTP servers notify the proxyDHCP
@@ -62,6 +69,13 @@ func New(o ServerOptions) (*Listener, error) {
 	}, nil
 }
 
+func (l *Listener) broadcastReply() bool {
+	if l.opts.BroadcastReply == nil {
+		return true
+	}
+	return *l.opts.BroadcastReply
+}
+
 // NoteServed implements OfferTracker — called by the TFTP/HTTP
 // servers when a client successfully fetches an asset.
 func (l *Listener) NoteServed(mac string) {
@@ -75,24 +89,32 @@ func (l *Listener) NoteServed(mac string) {
 
 // Serve binds 67 + 4011 and runs until ctx is cancelled.
 func (l *Listener) Serve(ctx context.Context) error {
-	addr67 := &net.UDPAddr{IP: net.ParseIP(l.opts.ListenIP), Port: 67}
-	addr4011 := &net.UDPAddr{IP: net.ParseIP(l.opts.ListenIP), Port: 4011}
+	p67 := l.opts.Port67
+	if p67 == 0 {
+		p67 = 67
+	}
+	p4011 := l.opts.Port4011
+	if p4011 == 0 {
+		p4011 = 4011
+	}
+	addr67 := &net.UDPAddr{IP: net.ParseIP(l.opts.ListenIP), Port: p67}
+	addr4011 := &net.UDPAddr{IP: net.ParseIP(l.opts.ListenIP), Port: p4011}
 
 	s67, err := server4.NewServer(l.opts.Interface, addr67, l.handler("udp/67"))
 	if err != nil {
-		return fmt.Errorf("bind udp/67: %w (hint: ports <1024 need root — try sudo, or a setcap on Linux)", err)
+		return fmt.Errorf("bind udp/%d: %w (hint: ports <1024 need root — try sudo, or a setcap on Linux)", p67, err)
 	}
 	l.srv67 = s67
 
 	s4011, err := server4.NewServer(l.opts.Interface, addr4011, l.handler("udp/4011"))
 	if err != nil {
 		_ = s67.Close()
-		return fmt.Errorf("bind udp/4011: %w (hint: ports <1024 need root)", err)
+		return fmt.Errorf("bind udp/%d: %w (hint: ports <1024 need root)", p4011, err)
 	}
 	l.srv4011 = s4011
 
-	l.log.Infof("listening on udp/67 (DHCP) and udp/4011 (PXE BINL), interface=%q advertise=%s",
-		l.opts.Interface, l.opts.Config.AdvertisedIP)
+	l.log.Infof("listening on udp/%d (DHCP) and udp/%d (PXE BINL), interface=%q advertise=%s",
+		p67, p4011, l.opts.Interface, l.opts.Config.AdvertisedIP)
 
 	errc := make(chan error, 2)
 	go func() { errc <- l.srv67.Serve() }()
@@ -137,7 +159,7 @@ func (l *Listener) handleOne(source string, conn net.PacketConn, peer net.Addr, 
 		l.log.Warnf("%s: peer is not UDP, dropping reply", source)
 		return
 	}
-	if source == "udp/67" {
+	if source == "udp/67" && l.broadcastReply() {
 		// Force broadcast for OFFER (proxyDHCP is broadcast-based).
 		dst = &net.UDPAddr{IP: net.IPv4bcast, Port: 68}
 	}
