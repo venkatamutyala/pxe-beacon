@@ -104,6 +104,31 @@ Every PXE client on the LAN gets the netboot.xyz menu. Same behavior as v0.1.3.
 
 ---
 
+## The minimal v0.5 example
+
+```bash
+# One file, one machine, no side-files needed:
+cat > ./fleet.yaml <<'EOF'
+machines:
+  - mac: 58:47:ca:70:c7:c9
+    name: venkat-1
+    boot: debian-12
+EOF
+
+sudo ./pxe-beacon -config ./fleet.yaml
+```
+
+That's it. pxe-beacon serves an embedded default preseed (user `pxe`,
+password `pxe` — insecure default, change before production) and an
+embedded default cloud-init (just phone_home so `/status` shows
+`installer-done` when the install finishes). Power-cycle your test
+client and walk away.
+
+Edit anything via the admin UI at `http://127.0.0.1:8080/admin`
+(loopback only — use `ssh -L 8080:localhost:8080` if remote). Or
+hand-edit `fleet.yaml` and SIGHUP-reload (`kill -HUP $(pgrep -x pxe-beacon)`).
+Hand-edits preserve comments; UI edits don't.
+
 ## Run — fleet mode (v0.2)
 
 Drop a `fleet.yaml` next to the binary describing your machines and

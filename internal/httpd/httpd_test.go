@@ -7,6 +7,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -697,6 +699,258 @@ func TestHTTP_Assets_404WithoutDataDir(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 when DataDir unset", resp.StatusCode)
 	}
+}
+
+// ----- v0.5.0 admin UI tests -----
+
+func startFleetServerWithAdminData(t *testing.T) (addr string, fleetPath string, dataDir string) {
+	t.Helper()
+	dir := t.TempDir()
+	dataDir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fleet.yaml"), []byte(`
+defaults:
+  boot: menu
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fleetPath = filepath.Join(dir, "fleet.yaml")
+	logBuf := &bytes.Buffer{}
+	log := narrlog.New("test", narrlog.LevelDebug, logBuf)
+	f, err := fleet.Load(fleetPath, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := fleet.NewTracker(f, 5*time.Second)
+
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	addr = ln.Addr().String()
+	_, portStr, _ := net.SplitHostPort(addr)
+	port, _ := strconv.Atoi(portStr)
+	_ = ln.Close()
+
+	// Wire data-dir for the assets override path.
+	assets.SetOverrideDir(dataDir)
+
+	s, err := New(Options{
+		Listen:       addr,
+		AdvertisedIP: "10.0.0.5",
+		HTTPPort:     port,
+		Logger:       log,
+		Fleet:        f,
+		FleetStatus:  tr,
+		DataDir:      dataDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = s.Serve(ctx); close(done) }()
+	time.Sleep(80 * time.Millisecond)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+		assets.SetOverrideDir("")
+		t.Logf("log dump:\n%s", logBuf.String())
+	})
+	return addr, fleetPath, dataDir
+}
+
+func TestHTTP_Admin_IndexRendersHTML(t *testing.T) {
+	addr, _, _ := startFleetServerWithAdminData(t)
+	resp, err := http.Get("http://" + addr + "/admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	for _, want := range []string{
+		"<html",
+		"pxe-beacon — admin",
+		"fleet machines",
+		"add or update a machine",
+		"templates",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("/admin missing %q", want)
+		}
+	}
+}
+
+func TestHTTP_Admin_FleetSave_WritesYAML(t *testing.T) {
+	addr, fleetPath, _ := startFleetServerWithAdminData(t)
+
+	// Pull a CSRF token from the admin page.
+	csrf := fetchCSRF(t, "http://"+addr+"/admin")
+
+	form := url.Values{
+		"csrf": {csrf},
+		"mac":  {"58:47:ca:70:c7:c9"},
+		"name": {"venkat-1"},
+		"boot": {"debian-12"},
+	}
+	resp, err := http.PostForm("http://"+addr+"/admin/fleet", form)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
+	}
+
+	// fleet.yaml on disk should now contain the entry.
+	raw, err := os.ReadFile(fleetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"58:47:ca:70:c7:c9",
+		"venkat-1",
+		"debian-12",
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("written fleet.yaml missing %q:\n%s", want, raw)
+		}
+	}
+}
+
+func TestHTTP_Admin_RejectsCSRFMismatch(t *testing.T) {
+	addr, _, _ := startFleetServerWithAdminData(t)
+	form := url.Values{
+		"csrf": {"bogus"},
+		"mac":  {"58:47:ca:70:c7:c9"},
+		"name": {"x"},
+		"boot": {"debian-12"},
+	}
+	resp, err := http.PostForm("http://"+addr+"/admin/fleet", form)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 (csrf mismatch)", resp.StatusCode)
+	}
+}
+
+func TestHTTP_Admin_TemplateView_EmbeddedByDefault(t *testing.T) {
+	addr, _, _ := startFleetServerWithAdminData(t)
+	resp, err := http.Get("http://" + addr + "/admin/templates/defaults/debian-preseed.cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	if !strings.Contains(s, "embedded default") {
+		t.Errorf("template view should label as embedded:\n%s", s[:min2(500, len(s))])
+	}
+}
+
+func TestHTTP_Admin_TemplateSave_WritesOverride(t *testing.T) {
+	addr, _, dataDir := startFleetServerWithAdminData(t)
+	csrf := fetchCSRF(t, "http://"+addr+"/admin")
+
+	content := "# override\nd-i passwd/username string customuser\n"
+	form := url.Values{
+		"csrf":    {csrf},
+		"content": {content},
+	}
+	// Disable redirect-following so we can assert the 303 response
+	// from the POST itself (PostForm follows by default and we'd
+	// otherwise see the eventual 200 from the edit page).
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	req, _ := http.NewRequest(http.MethodPost,
+		"http://"+addr+"/admin/templates/defaults/debian-preseed.cfg",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
+	}
+
+	// Override should be on disk.
+	override := filepath.Join(dataDir, "templates", "defaults", "debian-preseed.cfg")
+	raw, err := os.ReadFile(override)
+	if err != nil {
+		t.Fatalf("override file: %v", err)
+	}
+	if string(raw) != content {
+		t.Errorf("override content mismatch:\n got: %q\nwant: %q", raw, content)
+	}
+
+	// Next ReadDefault should return the override.
+	resolved, _ := assets.ReadDefault("debian-preseed.cfg")
+	if !strings.Contains(string(resolved), "customuser") {
+		t.Errorf("ReadDefault did not pick up disk override:\n%s", resolved)
+	}
+}
+
+func TestHTTP_Admin_LoopbackOnly_RejectsRemoteAddr(t *testing.T) {
+	// We can't easily fake RemoteAddr from inside http.PostForm, so
+	// directly test the middleware with a manually-constructed
+	// request.
+	mw := loopbackOnly(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	req.RemoteAddr = "10.0.0.42:54321" // non-loopback
+	mw.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("non-loopback got status %d, want 403", rec.Code)
+	}
+	// Confirm loopback IS allowed.
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	req2.RemoteAddr = "127.0.0.1:54321"
+	mw.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Errorf("loopback got status %d, want 200", rec2.Code)
+	}
+}
+
+// fetchCSRF scrapes the CSRF hidden input from the admin page so a
+// subsequent POST passes the guard.
+func fetchCSRF(t *testing.T, url string) string {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	// Look for: name="csrf" value="<token>"
+	const marker = `name="csrf" value="`
+	i := strings.Index(string(body), marker)
+	if i < 0 {
+		t.Fatalf("no csrf token in admin page: %s", body[:min2(500, len(body))])
+	}
+	rest := string(body)[i+len(marker):]
+	j := strings.Index(rest, `"`)
+	if j < 0 {
+		t.Fatalf("malformed csrf attribute")
+	}
+	return rest[:j]
 }
 
 func TestHTTP_Autoexec_RejectsBadMAC(t *testing.T) {

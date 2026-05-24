@@ -670,6 +670,158 @@ URLs (which they should). Adding a TBD `make verify-urls` target.
 
 ---
 
+## v0.5.0 — embedded defaults + self-contained TFTP dispatch + admin UI
+
+After three v0.4.x release cycles where the user's PXE boot kept
+falling through to the netboot.xyz menu instead of installing — and
+no tcpdump data to root-cause the iPXE HTTP chain failure — we
+**designed around the failure mode** instead. PXE-expert and PM
+reviews of the plan added nine non-negotiable technical fixes and
+forced a CSRF-guarded loopback-only admin UI. All landed in this
+release.
+
+### Architectural shift
+
+The TFTP-served `autoexec.ipxe` was a *redirector* in v0.4.x that
+chained iPXE to `/autoinstall/<mac>/autoexec.ipxe` over HTTP. That
+HTTP chain silently failed on the user's snponly iPXE for reasons we
+never positively identified. In v0.5.0 the redirector is replaced
+with a **self-contained per-MAC dispatch script** generated at TFTP
+request time from the live fleet. iPXE reads ONE file and
+kernel-boots directly. The kernel (d-i for Debian, Subiquity for
+Ubuntu) handles all subsequent HTTP — and those clients are decades
+mature compared to snponly's chain.
+
+The HTTP `/autoinstall/<mac>/autoexec.ipxe` route stays for backward
+compat (and `boot: custom` still uses it), but the default path no
+longer depends on it.
+
+`-legacy-redirector` opts back into the v0.4.x behavior for
+operators who want to bisect a regression. Off by default.
+
+### Embedded defaults
+
+`boot: debian-12` (or 13) with no `preseed:` or `cloud_init:` now
+"just works":
+
+- `internal/assets/scripts/defaults/debian-preseed.cfg` — user
+  `pxe`/`pxe` (insecure default, documented), generic disk auto-
+  detect with USB-stick safety guard, UEFI hardening
+  (`partman-efi/non_efi_system` + `grub-installer/force-efi-extra-
+  removable`).
+- `internal/assets/scripts/defaults/cloud-init.yaml` — hostname +
+  phone_home only.
+
+`assets.SetOverrideDir(<data-dir>)` plumbs disk overrides — every
+`ReadAutoexec` / `ReadDefault` checks `<data-dir>/templates/<rel>`
+before falling back to embedded. UI edits land there.
+
+`validateProfile` relaxed: Ubuntu's `cloud_init:` is now optional
+(falls back to embedded default).
+
+### Admin UI
+
+Loopback-only routes (rejected with 403 if `r.RemoteAddr` isn't
+`127.0.0.1` / `::1`), CSRF-guarded POSTs, no `-ui-allow-remote`
+escape hatch:
+
+- `GET /admin` — fleet table + add/update form + template list.
+- `POST /admin/fleet` — save a machine entry, writes `fleet.yaml`
+  atomically via tmp+rename. Sorted output for diff-ability.
+- `POST /admin/fleet/delete` — remove a machine.
+- `GET /admin/templates/{name...}` — text editor (textarea) for
+  any template in `assets.ListEditableTemplates()`. Shows the
+  embedded baseline in a collapsible block when an override
+  exists.
+- `POST /admin/templates/{name...}` — save override to
+  `<data-dir>/templates/<rel>`. Atomic.
+- `POST /admin/templates-reset/{name...}` — delete the override.
+- `POST /admin/reload` — in-process SIGHUP equivalent.
+
+CSRF token: per-process random 24-byte b64-encoded value, embedded
+in the form, checked on every POST. ~30 lines of middleware.
+
+**fleet.yaml writeback** uses `yaml.v3` Marshal — comments are LOST
+on UI-driven saves. Documented in the file header pxe-beacon writes
+("Hand-edits are fine; UI saves overwrite comments. Edit by hand to
+preserve them."). Operators who want comments-preserved should
+hand-edit and SIGHUP-reload.
+
+### PXE-expert fixes (9, all in)
+
+1. `dhcp` INSIDE each `:m_*` dispatch arm before `kernel` — pre-DHCP
+   `${net0/mac:hexhyp}` works for the iseq match, but the kernel
+   fetch needs IPv4 + DNS.
+2. HTTP not HTTPS for d-i kernel/initrd from `deb.debian.org` —
+   snponly's CA bundle / clock state cause intermittent Let's-
+   Encrypt chain failures.
+3. UEFI hardening in the default preseed (NVRAM-wipe survival on
+   AMI boards).
+4. Cloud-init bridge `late_command` drops `90-pxe-beacon-nocloud.cfg`
+   pinning `datasource_list: [NoCloud, None]` — no 120s
+   Ec2/Azure/GCP probe on first boot.
+5. `partman/early_command` picks first non-removable >=8GB disk via
+   `lsblk` — protects against an inserted USB stick getting nuked
+   during install.
+6. Ubuntu autoinstall kernel cmdline ends with `---` (22.04.3+
+   Subiquity requirement).
+7. `console=tty0 console=ttyS0,115200n8` baked into every kernel
+   cmdline — headless / serial-redirect server boards stop hanging
+   invisibly.
+8. Each dispatch arm emits `echo` narration before each step + a
+   `sleep 3` before `shell` on failure — preserves the "actually
+   debuggable" north-star promise. Failed kernel fetch no longer
+   leaves the operator at a context-less iPXE prompt.
+9. AMI option-67 first-DISCOVER quirk documented (the 6-second
+   silence in earlier user logs is AMI being AMI, not a pxe-beacon
+   bug).
+
+### `debug.sh`
+
+Repo-root one-shot diagnostic — captures pxe-beacon version,
+fleet.yaml, lsof, firewall state, /status.json, /admin, autoexec +
+preseed dumps, TFTP autoexec.ipxe, arp, and a 60-second tcpdump
+PCAP + text transcript. Writes `pxe-beacon-debug.txt` for paste-back.
+
+### Test surface
+
+- `internal/boot/dispatch_test.go` — empty fleet → default arm only;
+  user MAC + debian-12 → all 9 PXE expert fixes verified; mixed
+  fleet → each target gets its own block.
+- `internal/httpd/httpd_test.go` extended:
+  `TestHTTP_Preseed_UsesEmbeddedDefaultWhenOmitted_v050`,
+  `TestHTTP_Admin_IndexRendersHTML`,
+  `TestHTTP_Admin_FleetSave_WritesYAML`,
+  `TestHTTP_Admin_RejectsCSRFMismatch`,
+  `TestHTTP_Admin_TemplateView_EmbeddedByDefault`,
+  `TestHTTP_Admin_TemplateSave_WritesOverride`,
+  `TestHTTP_Admin_LoopbackOnly_RejectsRemoteAddr`.
+- `internal/fleet/fleet_test.go` — inverted
+  `TestLoad_UbuntuWithoutCloudInit_OK_v050` (used to error, now
+  succeeds because of embedded default).
+- ~97 tests total, all green.
+
+### Ship trade-offs documented
+
+- **Comments in fleet.yaml are lost on UI-driven saves.** Use git +
+  hand-edit + SIGHUP if you care.
+- **`pxe`/`pxe` default credential.** Documented in the embedded
+  preseed header. For production, override the template via
+  `/admin/templates/defaults/debian-preseed.cfg` and replace the
+  password hash.
+- **No remote admin UI.** Loopback only. Use an SSH tunnel
+  (`ssh -L 8080:localhost:8080 host`) if you need to edit from
+  elsewhere.
+
+### Hardware boot test
+
+Per PM-imposed ship criterion: the user verifies a real Debian
+unattended install on their AMI-firmware client BEFORE we treat
+v0.5.0 as done. If that test fails, we iterate before any future
+release.
+
+---
+
 ## v0.2.2 — `debian-13` (Trixie) target
 
 Trivial follow-up to v0.2.1: add a `debian-13` target mirroring

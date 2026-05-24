@@ -70,6 +70,7 @@ type Server struct {
 	mux        *http.ServeMux
 	tmpl       *template.Template
 	statusTmpl *htmltmpl.Template
+	admin      *adminState
 	startedAt  time.Time
 }
 
@@ -101,12 +102,17 @@ func New(o Options) (*Server, error) {
 		return nil, fmt.Errorf("parse status.html: %w", err)
 	}
 
+	admin, err := newAdminState()
+	if err != nil {
+		return nil, fmt.Errorf("init admin state: %w", err)
+	}
 	s := &Server{
 		opts:       o,
 		log:        o.Logger.With("http"),
 		mux:        http.NewServeMux(),
 		tmpl:       tmpl,
 		statusTmpl: statusTmpl,
+		admin:      admin,
 		startedAt:  time.Now(),
 	}
 	s.routes()
@@ -173,6 +179,17 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /status", s.handleStatusHTML)
 	s.mux.HandleFunc("GET /status.json", s.handleStatusJSON)
 	s.mux.HandleFunc("GET /assets/{target}/{file}", s.handleAsset)
+
+	// Admin routes — loopback-only, CSRF-guarded on POST. Wildcard
+	// {name...} captures slash-containing template paths like
+	// "defaults/debian-preseed.cfg".
+	s.mux.Handle("GET /admin", loopbackOnly(http.HandlerFunc(s.handleAdminIndex)))
+	s.mux.Handle("GET /admin/templates/{name...}", loopbackOnly(http.HandlerFunc(s.handleAdminTemplateView)))
+	s.mux.Handle("POST /admin/fleet", loopbackOnly(http.HandlerFunc(s.csrfGuard(s.handleAdminFleetSave))))
+	s.mux.Handle("POST /admin/fleet/delete", loopbackOnly(http.HandlerFunc(s.csrfGuard(s.handleAdminFleetDelete))))
+	s.mux.Handle("POST /admin/templates-reset/{name...}", loopbackOnly(http.HandlerFunc(s.csrfGuard(s.handleAdminTemplateReset))))
+	s.mux.Handle("POST /admin/templates/{name...}", loopbackOnly(http.HandlerFunc(s.csrfGuard(s.handleAdminTemplateSave))))
+	s.mux.Handle("POST /admin/reload", loopbackOnly(http.HandlerFunc(s.csrfGuard(s.handleAdminReload))))
 }
 
 // macHyphen is what iPXE's ${net0/mac:hexhyp} produces and what we

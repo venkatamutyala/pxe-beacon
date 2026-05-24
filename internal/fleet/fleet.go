@@ -329,6 +329,14 @@ func (f *Fleet) Defaults() Profile {
 	return f.defaults
 }
 
+// BaseDir returns the directory of the loaded fleet.yaml (used to
+// resolve relative paths from the admin UI). Empty for Empty fleets.
+func (f *Fleet) BaseDir() string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.baseDir
+}
+
 // CanonicalMAC normalizes a MAC string to lowercase colon-separated
 // form ("58:47:ca:70:c7:c9"). Accepts colon, hyphen, dot, or no
 // separator; case-insensitive. Returns error on anything that

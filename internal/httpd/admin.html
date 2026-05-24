@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>pxe-beacon — admin</title>
+<style>
+  body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; background: #0d1117; color: #c9d1d9; margin: 0; padding: 1.5rem; max-width: 1100px; }
+  h1 { margin: 0 0 .25rem 0; font-size: 1.2rem; }
+  h2 { font-size: 1rem; margin: 1.5rem 0 .5rem 0; color: #58a6ff; }
+  .meta { color: #8b949e; font-size: .85rem; margin-bottom: 1rem; }
+  table { border-collapse: collapse; width: 100%; margin: .5rem 0; }
+  th, td { padding: .35rem .75rem; text-align: left; border-bottom: 1px solid #21262d; vertical-align: top; }
+  th { color: #8b949e; font-weight: 500; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+  td.mac { color: #8b949e; font-size: .85rem; }
+  td.actions form { display: inline; }
+  input, select, textarea, button {
+    background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px;
+    font-family: inherit; font-size: .9rem; padding: .35rem .5rem;
+  }
+  button { cursor: pointer; }
+  button:hover { background: #21262d; }
+  button.danger { color: #f85149; border-color: #6e2424; }
+  button.primary { background: #1f6feb; border-color: #1f6feb; color: white; }
+  textarea { width: 100%; min-height: 30rem; font-size: .85rem; box-sizing: border-box; }
+  form.machine { display: grid; grid-template-columns: 7rem 1fr; gap: .4rem .75rem; align-items: center; margin: 1rem 0; padding: 1rem; background: #161b22; border-radius: 6px; max-width: 800px; }
+  form.machine label { color: #8b949e; font-size: .85rem; }
+  form.machine input, form.machine select { width: 100%; box-sizing: border-box; }
+  form.machine .buttons { grid-column: 1 / -1; text-align: right; margin-top: .5rem; }
+  .nav a { color: #58a6ff; margin-right: 1.5rem; text-decoration: none; }
+  .nav a:hover { text-decoration: underline; }
+  .flash-ok { background: #1a3d1a; border: 1px solid #2da44e; padding: .5rem .75rem; border-radius: 4px; margin: .5rem 0; }
+  .flash-err { background: #3d1a1a; border: 1px solid #f85149; padding: .5rem .75rem; border-radius: 4px; margin: .5rem 0; }
+  code { color: #79c0ff; }
+  details { margin: .5rem 0; }
+  details summary { cursor: pointer; color: #8b949e; }
+  .tmpl-row { margin: .5rem 0; padding: .5rem .75rem; background: #161b22; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; }
+  .tmpl-row .name { color: #79c0ff; }
+  .tmpl-row .badge { color: #d29922; font-size: .8rem; padding: .1rem .4rem; background: #3d3014; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>pxe-beacon — admin</h1>
+<div class="meta">
+  server {{.AdvertisedIP}}:{{.HTTPPort}} ·
+  fleet: {{len .Machines}} machine(s) ·
+  data-dir: <code>{{.DataDir}}</code>
+</div>
+<div class="nav">
+  <a href="/admin">/admin</a>
+  <a href="/status">/status</a>
+  <a href="/status.json">/status.json</a>
+</div>
+
+{{if .Flash}}<div class="flash-{{.FlashKind}}">{{.Flash}}</div>{{end}}
+
+<h2>fleet machines</h2>
+<table>
+  <thead>
+    <tr><th>name</th><th>mac</th><th>boot</th><th>preseed</th><th>cloud_init</th><th>ipxe_script</th><th></th></tr>
+  </thead>
+  <tbody>
+  {{range .Machines}}
+    <tr>
+      <td>{{.Profile.Name}}</td>
+      <td class="mac">{{.MAC}}</td>
+      <td>{{.Profile.Boot}}</td>
+      <td>{{if .Profile.Preseed}}{{.Profile.Preseed}}{{else}}<span class="mac">(default)</span>{{end}}</td>
+      <td>{{if .Profile.CloudInit}}{{.Profile.CloudInit}}{{else}}<span class="mac">(default)</span>{{end}}</td>
+      <td>{{if .Profile.IPXEScript}}{{.Profile.IPXEScript}}{{else}}—{{end}}</td>
+      <td class="actions">
+        <form method="POST" action="/admin/fleet/delete" onsubmit="return confirm('Delete {{.Profile.Name}} ({{.MAC}})?');">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <input type="hidden" name="mac" value="{{.MAC}}">
+          <button type="submit" class="danger">delete</button>
+        </form>
+      </td>
+    </tr>
+  {{else}}
+    <tr><td colspan="7" class="mac">no machines configured — add one below</td></tr>
+  {{end}}
+  </tbody>
+</table>
+
+<h2>add or update a machine</h2>
+<form class="machine" method="POST" action="/admin/fleet">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+
+  <label for="mac">mac</label>
+  <input id="mac" name="mac" type="text" placeholder="58:47:ca:70:c7:c9" required>
+
+  <label for="name">name</label>
+  <input id="name" name="name" type="text" placeholder="kube-1" required>
+
+  <label for="boot">boot</label>
+  <select id="boot" name="boot" required>
+    <option value="menu">menu — netboot.xyz interactive</option>
+    <option value="debian-12" selected>debian-12 — unattended d-i (default preseed)</option>
+    <option value="debian-13">debian-13 — unattended d-i (Trixie)</option>
+    <option value="ubuntu-22.04">ubuntu-22.04 — Subiquity (requires fetch)</option>
+    <option value="ubuntu-24.04">ubuntu-24.04 — Subiquity (requires fetch)</option>
+    <option value="custom">custom — ipxe_script required</option>
+  </select>
+
+  <label for="preseed">preseed</label>
+  <input id="preseed" name="preseed" type="text" placeholder="(empty = embedded default for debian-*)">
+
+  <label for="cloud_init">cloud_init</label>
+  <input id="cloud_init" name="cloud_init" type="text" placeholder="(empty = embedded default with phone_home)">
+
+  <label for="ipxe_script">ipxe_script</label>
+  <input id="ipxe_script" name="ipxe_script" type="text" placeholder="(required for boot: custom)">
+
+  <div class="buttons">
+    <button type="submit" class="primary">save</button>
+  </div>
+</form>
+
+<h2>templates</h2>
+<p class="mac">Edit any template to customize it. Saved overrides live under <code>{{.DataDir}}/templates/</code> and take precedence over the embedded baseline. <code>reset</code> deletes the override and reverts to the embedded.</p>
+{{range .Templates}}
+  <div class="tmpl-row">
+    <span class="name">{{.}}</span>
+    <span>
+      <a href="/admin/templates/{{.}}"><button type="button">edit</button></a>
+    </span>
+  </div>
+{{end}}
+
+<h2>actions</h2>
+<form method="POST" action="/admin/reload" style="display:inline">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <button type="submit">reload fleet (SIGHUP equivalent)</button>
+</form>
+
+</body>
+</html>
