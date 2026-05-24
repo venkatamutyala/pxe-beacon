@@ -72,7 +72,6 @@ machines:
 		// Console for headless boards (PXE expert fix #7). v0.6.9
 		// swapped order so tty0 is LAST (d-i renders on screen).
 		"console=ttyS0,115200n8 console=tty0",
-		"BOOTIF=01-${net0/mac:hexhyp}",
 		// Narration with sleep before reboot (PXE expert fix #8;
 		// v0.5.3 uses goto-labeled error blocks ending in sleep+reboot).
 		"echo pxe-beacon:",

@@ -67,7 +67,7 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("# the boot story unfold.")
 	w("")
 	w("echo ============================================================")
-	w("echo  pxe-beacon dispatch (v0.6.9) — console-order fix + BOOTIF + debconf debug")
+	w("echo  pxe-beacon dispatch (v0.6.10) — back out BOOTIF + DEBCONF_DEBUG from v0.6.9")
 	w("echo ============================================================")
 	w("echo")
 	w("echo [stage 0/5] iPXE settings BEFORE dhcp")
@@ -216,17 +216,17 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	// v0.6.9: tty0 LAST. With Linux multi-console, dmesg goes to all
 	// consoles but the d-i UI (userspace stdout) goes only to the
 	// LAST one listed. Putting tty0 last means the screen shows d-i;
-	// boxes with serial cables also see everything via dmesg. The
-	// previous order (tty0 first) sent d-i to ttyS0 — invisible
-	// without a serial cable, which looked like a freeze after
-	// firmware-load warnings.
+	// boxes with serial cables also see everything via dmesg.
 	consoleArgs := "console=ttyS0,115200n8 console=tty0"
-	// v0.6.9: BOOTIF and verbose debconf. BOOTIF tells d-i which NIC
-	// PXE booted from (avoids netcfg picking the wrong interface — e.g.
-	// a WiFi NIC with no firmware loaded). DEBCONF_DEBUG=5 logs full
-	// debconf transcript to /var/log/syslog inside d-i for post-mortem.
-	bootifArg := "BOOTIF=01-${net0/mac:hexhyp}"
-	debugArg := "DEBCONF_DEBUG=5"
+	// v0.6.10: BOOTIF and DEBCONF_DEBUG removed. v0.6.9 added both;
+	// user reported d-i pid 396 looping ("exited. scheduling for
+	// restart") shortly after kernel boot. Most likely BOOTIF
+	// pointed d-i at an interface it couldn't bring up, or the very
+	// verbose debconf output flooded something. Back to a minimal
+	// cmdline — netcfg/choose_interface=auto in the preseed handles
+	// NIC selection without BOOTIF.
+	bootifArg := "" // intentionally empty in v0.6.10
+	debugArg := ""  // intentionally empty in v0.6.10
 
 	// v0.6.0: when -client-netmask was used to widen iPXE's netmask
 	// for cross-/24 routing to pxe-beacon, we also need to pass the
