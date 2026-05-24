@@ -90,18 +90,21 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	// Stable order — sort by MAC for diff-ability.
 	sort.Slice(machines, func(i, j int) bool { return machines[i].MAC < machines[j].MAC })
 
-	// Dispatch table. We compare against each NIC iPXE has discovered
-	// (net0..net3). The dropped `${mac:hexhyp}` variant from v0.5.2
-	// turned out to not be a standard iPXE setting in some builds —
-	// it expanded to empty and the iseq fell through silently or
-	// parse-errored. The /debug/iPXE-state phone-home logs which
-	// variant actually carries the booting MAC.
-	w("# ----- per-MAC dispatch (multi-NIC safe via net0..net3) -----")
+	// v0.5.14: dispatch table — one iseq per line, NO chained ||.
+	// Multi-line `iseq A B && goto X || iseq C D && goto Y || ...`
+	// does NOT work in iPXE the way bash precedence would suggest.
+	// Confirmed by venkat@'s shell test: `iseq abc abc && echo P || echo F`
+	// works fine in isolation, but my chained form fell through on
+	// the very first iseq. Switching to plain one-per-line: if iseq
+	// succeeds, && goto jumps; if iseq fails, goto skipped, parser
+	// moves to next statement. Falls through to `goto target_default`
+	// at the bottom only when all iseqs failed.
+	w("# ----- per-MAC dispatch (one iseq per line; covers net0..net3) -----")
 	for _, m := range machines {
 		label := labelOf(m.MAC, m.Profile.Name)
 		hyp := strings.ReplaceAll(m.MAC, ":", "-")
 		for _, nic := range []string{"net0/mac:hexhyp", "net1/mac:hexhyp", "net2/mac:hexhyp", "net3/mac:hexhyp"} {
-			fmt.Fprintf(&buf, "iseq ${%s} %s && goto %s ||\n", nic, hyp, label)
+			fmt.Fprintf(&buf, "iseq ${%s} %s && goto %s\n", nic, hyp, label)
 		}
 	}
 	w("goto target_default")
