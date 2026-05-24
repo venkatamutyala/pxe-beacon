@@ -69,10 +69,17 @@ machines:
 		// Console for headless boards (PXE expert fix #7).
 		"console=tty0 console=ttyS0,115200n8",
 		// Narration with sleep before reboot (PXE expert fix #8;
-		// v0.5.2 swapped shell→reboot so messages persist).
+		// v0.5.3 uses goto-labeled error blocks ending in sleep+reboot).
 		"echo pxe-beacon:",
-		"sleep 15",
+		"sleep 30",
 		"reboot",
+		// v0.5.3: control flow uses explicit gotos to avoid the
+		// `cmd || X && Y && reboot` precedence trap. Each fail path
+		// has its own labeled block.
+		"goto m_venkat-1_fail_kernel",
+		":m_venkat-1_fail_kernel",
+		"goto m_venkat-1_fail_boot",
+		":m_venkat-1_fail_boot",
 		// Default fallback arm still present.
 		":target_default",
 	} {

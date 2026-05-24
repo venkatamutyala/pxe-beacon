@@ -51,7 +51,7 @@ func RenderDispatch(f *fleet.Fleet, ctx DispatchContext) []byte {
 	// firmware quirk). The 'echo ===' framing makes it survive
 	// scroll-off long enough to read on slow consoles.
 	w("echo ==============================================")
-	w("echo pxe-beacon dispatch (v0.5.2)")
+	w("echo pxe-beacon dispatch (v0.5.3)")
 	w("echo   mac (boot NIC) = ${mac}")
 	w("echo   mac:hexhyp     = ${mac:hexhyp}")
 	w("echo   net0/mac       = ${net0/mac}")
@@ -101,11 +101,20 @@ func RenderDispatch(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("echo pxe-beacon: NO MATCH for ${net0/mac:hexhyp} in fleet.yaml")
 	w("echo pxe-beacon: if you EXPECTED a match, check that fleet.yaml's mac matches ${mac:hexhyp} above")
 	w("sleep 8")
-	w("dhcp || echo pxe-beacon: dhcp failed in default arm")
+	w("dhcp || goto target_default_fail_dhcp")
 	w("echo pxe-beacon: chaining https://boot.netboot.xyz/menu.ipxe ...")
-	w("chain --replace --autofree https://boot.netboot.xyz/menu.ipxe ||")
-	w("echo pxe-beacon: netboot.xyz chain failed; rebooting in 15s")
-	w("sleep 15")
+	w("chain --replace --autofree https://boot.netboot.xyz/menu.ipxe || goto target_default_fail_chain")
+	// Error blocks. chain success replaces iPXE (never returns), so
+	// fallthrough only happens on goto.
+	w("")
+	w(":target_default_fail_dhcp")
+	w("echo pxe-beacon: DHCP FAILED in default arm — rebooting in 30s")
+	w("sleep 30")
+	w("reboot")
+	w("")
+	w(":target_default_fail_chain")
+	w("echo pxe-beacon: netboot.xyz CHAIN FAILED — check HTTPS reachability; rebooting in 30s")
+	w("sleep 30")
 	w("reboot")
 
 	return buf.Bytes()
@@ -132,7 +141,16 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	w("")
 	fmt.Fprintf(buf, ":%s\n", label)
 	fmt.Fprintf(buf, "echo pxe-beacon: %s (%s) -> %s\n", name, m.MAC, m.Profile.Boot)
-	w("dhcp || echo pxe-beacon: dhcp failed; cannot fetch kernel && sleep 15 && reboot")
+
+	// v0.5.3: control flow uses explicit goto labels for every error
+	// branch. The previous form `cmd || echo X && sleep N && reboot`
+	// was a precedence trap — iPXE/bash evaluate it as
+	// `(cmd || echo) && sleep && reboot`, so `sleep + reboot` fires
+	// after `cmd` SUCCEEDS too, putting the box in a reboot loop that
+	// never reaches the kernel.
+
+	// DHCP: needed for kernel/initrd HTTP fetch. (PXE expert fix #1.)
+	fmt.Fprintf(buf, "dhcp || goto %s_fail_dhcp\n", label)
 	w("imgfree")
 
 	switch m.Profile.Boot {
@@ -141,49 +159,26 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 		fmt.Fprintf(buf, "echo pxe-beacon: ip=${ip} gw=${gateway} dns=${dns}\n")
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching Debian 12 d-i kernel: %s/linux\n", mirror)
 		fmt.Fprintf(buf,
-			"kernel --name linux %s/linux auto=true priority=critical ip=dhcp url=%s %s --- ||\n",
-			mirror, preseedURL, consoleArgs)
-		w("echo pxe-beacon: KERNEL FETCH FAILED — client cannot reach deb.debian.org over HTTP")
-		w("echo pxe-beacon: tried URL above; verify DNS + outbound HTTP from this NIC")
-		w("sleep 15")
-		w("echo pxe-beacon: rebooting (use iPXE Ctrl+B during banner to break in for debug)")
-		w("reboot")
+			"kernel --name linux %s/linux auto=true priority=critical ip=dhcp url=%s %s --- || goto %s_fail_kernel\n",
+			mirror, preseedURL, consoleArgs, label)
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching initrd: %s/initrd.gz\n", mirror)
-		fmt.Fprintf(buf, "initrd --name initrd.gz %s/initrd.gz ||\n", mirror)
-		w("echo pxe-beacon: INITRD FETCH FAILED — kernel got through but initrd did not")
-		w("sleep 15")
-		w("echo pxe-beacon: rebooting (use iPXE Ctrl+B during banner to break in for debug)")
-		w("reboot")
+		fmt.Fprintf(buf, "initrd --name initrd.gz %s/initrd.gz || goto %s_fail_initrd\n", mirror, label)
 		w("echo pxe-beacon: handing control to d-i (boot)...")
-		fmt.Fprintf(buf, "boot ||\n")
-		w("echo pxe-beacon: BOOT FAILED — kernel image rejected (cmdline / arch mismatch?)")
-		w("sleep 15")
-		w("echo pxe-beacon: rebooting (use iPXE Ctrl+B during banner to break in for debug)")
-		w("reboot")
+		fmt.Fprintf(buf, "boot || goto %s_fail_boot\n", label)
+		writeMachineErrorBlocks(buf, label, m.Profile.Boot, mirror)
 
 	case "debian-13":
 		mirror := "http://deb.debian.org/debian/dists/trixie/main/installer-amd64/current/images/netboot/debian-installer/amd64"
 		fmt.Fprintf(buf, "echo pxe-beacon: ip=${ip} gw=${gateway} dns=${dns}\n")
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching Debian 13 d-i kernel: %s/linux\n", mirror)
 		fmt.Fprintf(buf,
-			"kernel --name linux %s/linux auto=true priority=critical ip=dhcp url=%s %s --- ||\n",
-			mirror, preseedURL, consoleArgs)
-		w("echo pxe-beacon: KERNEL FETCH FAILED — client cannot reach deb.debian.org over HTTP")
-		w("sleep 15")
-		w("echo pxe-beacon: rebooting (use iPXE Ctrl+B during banner to break in for debug)")
-		w("reboot")
+			"kernel --name linux %s/linux auto=true priority=critical ip=dhcp url=%s %s --- || goto %s_fail_kernel\n",
+			mirror, preseedURL, consoleArgs, label)
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching initrd: %s/initrd.gz\n", mirror)
-		fmt.Fprintf(buf, "initrd --name initrd.gz %s/initrd.gz ||\n", mirror)
-		w("echo pxe-beacon: INITRD FETCH FAILED")
-		w("sleep 15")
-		w("echo pxe-beacon: rebooting (use iPXE Ctrl+B during banner to break in for debug)")
-		w("reboot")
+		fmt.Fprintf(buf, "initrd --name initrd.gz %s/initrd.gz || goto %s_fail_initrd\n", mirror, label)
 		w("echo pxe-beacon: handing control to d-i (boot)...")
-		fmt.Fprintf(buf, "boot ||\n")
-		w("echo pxe-beacon: BOOT FAILED")
-		w("sleep 15")
-		w("echo pxe-beacon: rebooting (use iPXE Ctrl+B during banner to break in for debug)")
-		w("reboot")
+		fmt.Fprintf(buf, "boot || goto %s_fail_boot\n", label)
+		writeMachineErrorBlocks(buf, label, m.Profile.Boot, mirror)
 
 	case "ubuntu-22.04", "ubuntu-24.04":
 		assets := assetsBase(m.Profile.Boot)
@@ -194,12 +189,12 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 		// it Subiquity prompts. Order: cmdline args, then ---, then
 		// initrd.
 		fmt.Fprintf(buf,
-			"kernel --name vmlinuz %s/vmlinuz initrd=initrd ip=dhcp ipv6.disable=1 boot=casper url=%s/filesystem.squashfs %s autoinstall ds=nocloud-net\\;s=%s ---\n",
-			assets, assets, consoleArgs, autoinstallBase)
-		fmt.Fprintf(buf, "initrd --name initrd %s/initrd ||\n", assets)
-		w("echo pxe-beacon: initrd fetch failed; run `pxe-beacon fetch " + m.Profile.Boot + "` to populate data-dir && sleep 3 && shell")
-		fmt.Fprintf(buf, "boot ||\n")
-		w("echo pxe-beacon: boot failed; check Subiquity cmdline + /assets/ reachability && sleep 3 && shell")
+			"kernel --name vmlinuz %s/vmlinuz initrd=initrd ip=dhcp ipv6.disable=1 boot=casper url=%s/filesystem.squashfs %s autoinstall ds=nocloud-net\\;s=%s --- || goto %s_fail_kernel\n",
+			assets, assets, consoleArgs, autoinstallBase, label)
+		fmt.Fprintf(buf, "initrd --name initrd %s/initrd || goto %s_fail_initrd\n", assets, label)
+		w("echo pxe-beacon: handing control to Subiquity (boot)...")
+		fmt.Fprintf(buf, "boot || goto %s_fail_boot\n", label)
+		writeMachineErrorBlocks(buf, label, m.Profile.Boot, assets)
 
 	case "custom":
 		// We can't inline an arbitrary operator script — but we CAN
@@ -210,19 +205,65 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 			ctx.AdvertisedIP, ctx.HTTPPort,
 			strings.ReplaceAll(m.MAC, ":", "-"))
 		fmt.Fprintf(buf, "echo pxe-beacon: chaining operator-supplied script %s\n", customURL)
-		fmt.Fprintf(buf, "chain --replace --autofree %s ||\n", customURL)
-		w("echo pxe-beacon: custom script chain failed; check HTTP reachability && sleep 3 && shell")
+		fmt.Fprintf(buf, "chain --replace --autofree %s || goto %s_fail_chain\n", customURL, label)
+		// Error blocks for custom (only chain can fail; no kernel/initrd here).
+		fmt.Fprintf(buf, "\n:%s_fail_dhcp\n", label)
+		w("echo pxe-beacon: DHCP FAILED in custom arm — no IP, rebooting in 30s")
+		w("sleep 30")
+		w("reboot")
+		fmt.Fprintf(buf, "\n:%s_fail_chain\n", label)
+		w("echo pxe-beacon: custom script CHAIN FAILED — check HTTP reachability to operator URL")
+		w("sleep 30")
+		w("reboot")
 
 	case "menu":
 		fmt.Fprintf(buf, "echo pxe-beacon: chaining netboot.xyz menu\n")
-		w("chain --replace --autofree https://boot.netboot.xyz/menu.ipxe ||")
-		w("chain --replace --autofree http://boot.netboot.xyz/menu.ipxe ||")
-		w("echo pxe-beacon: netboot.xyz chain failed && sleep 3 && shell")
+		fmt.Fprintf(buf, "chain --replace --autofree https://boot.netboot.xyz/menu.ipxe || goto %s_fail_chain\n", label)
+		fmt.Fprintf(buf, "\n:%s_fail_dhcp\n", label)
+		w("echo pxe-beacon: DHCP FAILED in menu arm — no IP, rebooting in 30s")
+		w("sleep 30")
+		w("reboot")
+		fmt.Fprintf(buf, "\n:%s_fail_chain\n", label)
+		w("echo pxe-beacon: netboot.xyz menu CHAIN FAILED — check HTTPS reachability")
+		w("sleep 30")
+		w("reboot")
 
 	default:
 		fmt.Fprintf(buf, "echo pxe-beacon: unknown boot target %q for %s; falling through\n", m.Profile.Boot, name)
 		w("goto target_default")
 	}
+}
+
+// writeMachineErrorBlocks emits labeled error handlers for the
+// dhcp/kernel/initrd/boot failure paths shared by debian-* and
+// ubuntu-* targets. Each block ends in `reboot` which terminates
+// the script — no fallthrough between blocks.
+func writeMachineErrorBlocks(buf *bytes.Buffer, label, target, srcURL string) {
+	w := func(s string) { buf.WriteString(s); buf.WriteByte('\n') }
+	fmt.Fprintf(buf, "\n:%s_fail_dhcp\n", label)
+	w("echo pxe-beacon: DHCP FAILED — iPXE could not get an IP, cannot fetch kernel")
+	w("echo pxe-beacon: rebooting in 30s")
+	w("sleep 30")
+	w("reboot")
+
+	fmt.Fprintf(buf, "\n:%s_fail_kernel\n", label)
+	fmt.Fprintf(buf, "echo pxe-beacon: KERNEL FETCH FAILED for %s\n", target)
+	fmt.Fprintf(buf, "echo pxe-beacon: could not reach %s/linux\n", srcURL)
+	w("echo pxe-beacon: verify DNS + outbound HTTP from this NIC; rebooting in 30s")
+	w("sleep 30")
+	w("reboot")
+
+	fmt.Fprintf(buf, "\n:%s_fail_initrd\n", label)
+	fmt.Fprintf(buf, "echo pxe-beacon: INITRD FETCH FAILED for %s — kernel loaded but initrd did not\n", target)
+	w("echo pxe-beacon: rebooting in 30s")
+	w("sleep 30")
+	w("reboot")
+
+	fmt.Fprintf(buf, "\n:%s_fail_boot\n", label)
+	fmt.Fprintf(buf, "echo pxe-beacon: BOOT FAILED for %s — kernel image rejected (cmdline / arch mismatch?)\n", target)
+	w("echo pxe-beacon: rebooting in 30s")
+	w("sleep 30")
+	w("reboot")
 }
 
 // labelOf produces a stable iPXE label for a machine. iPXE labels are
