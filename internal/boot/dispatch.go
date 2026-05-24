@@ -40,38 +40,40 @@ func RenderDispatch(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w := func(s string) { buf.WriteString(s); buf.WriteByte('\n') }
 
 	w("#!ipxe")
+	// v0.5.7: probes are FIRST — before banner echoes, before any
+	// variable substitution. v0.5.6 didn't see either HTTP or TFTP
+	// probes hit pxe-beacon despite the matched arm running ~5s
+	// later; strong signal that the script was aborting before the
+	// probes (banner echoes use ${net1/mac:hexhyp} on a NIC that
+	// probably doesn't exist, and some iPXE builds bail on
+	// undefined-variable refs). The two minimal probes here use NO
+	// variables — pure literal URLs. If neither hits the server,
+	// iPXE isn't running our script at all and embed.ipxe is taking
+	// over (next debug step: examine TFTP-of-autoexec sequence).
+	addr := fmt.Sprintf("%s:%d", ctx.AdvertisedIP, ctx.HTTPPort)
+	fmt.Fprintf(&buf, "chain --autofree tftp://%s/probe/script-started ||\n", ctx.AdvertisedIP)
+	w("echo TFTP_PROBE_FAILED")
+	fmt.Fprintf(&buf, "chain --autofree http://%s/debug/probe/script-started ||\n", addr)
+	w("echo HTTP_PROBE_FAILED")
+	w("")
 	w("# pxe-beacon dispatch — generated per request from fleet.yaml.")
 	w("# Each machine matches by MAC and kernel-boots its target OS")
 	w("# directly. No HTTP chain dependency.")
 	w("")
 	w("echo ==============================================")
-	w("echo pxe-beacon dispatch (v0.5.6)")
+	w("echo pxe-beacon dispatch (v0.5.7)")
 	w("echo   net0/mac       = ${net0/mac}")
 	w("echo   net0/mac:hxhyp = ${net0/mac:hexhyp}")
-	w("echo   net1/mac:hxhyp = ${net1/mac:hexhyp}")
 	w("echo ==============================================")
 	w("")
-	// v0.5.6: phone-home over BOTH HTTP and TFTP. If iPXE's TCP is
-	// broken on this firmware (a known AMI-SNP quirk), HTTP probes
-	// silently fail but TFTP probes succeed — proving the diagnosis
-	// and unblocking the next architectural step.
-	//
-	// Each probe is a single chain with a path-based URL — no `&`,
-	// no query string, no risk of URL-parser quirks in iPXE.
-	addr := fmt.Sprintf("%s:%d", ctx.AdvertisedIP, ctx.HTTPPort)
-	fmt.Fprintf(&buf, "echo pxe-beacon: probing HTTP reachability to %s (5 chains)\n", addr)
-	fmt.Fprintf(&buf, "chain --autofree http://%s/debug/probe/ping || echo HTTP ping FAILED\n", addr)
-	fmt.Fprintf(&buf, "chain --autofree http://%s/debug/probe/net0/${net0/mac:hexhyp} || echo HTTP net0 FAILED\n", addr)
-	fmt.Fprintf(&buf, "chain --autofree http://%s/debug/probe/net1/${net1/mac:hexhyp} || echo HTTP net1 FAILED\n", addr)
-	fmt.Fprintf(&buf, "chain --autofree http://%s/debug/probe/ip/${ip} || echo HTTP ip FAILED\n", addr)
-	fmt.Fprintf(&buf, "chain --autofree http://%s/debug/probe/gateway/${gateway} || echo HTTP gw FAILED\n", addr)
-	// TFTP probes — TFTP is known to work (we just used it to fetch
-	// this very script). If TFTP probes succeed but HTTP probes
-	// don't, iPXE's TCP stack is broken on this firmware.
-	fmt.Fprintf(&buf, "echo pxe-beacon: probing TFTP reachability (3 chains)\n")
-	fmt.Fprintf(&buf, "chain --autofree tftp://%s/probe/ping || echo TFTP ping FAILED\n", ctx.AdvertisedIP)
-	fmt.Fprintf(&buf, "chain --autofree tftp://%s/probe/net0/${net0/mac:hexhyp} || echo TFTP net0 FAILED\n", ctx.AdvertisedIP)
-	fmt.Fprintf(&buf, "chain --autofree tftp://%s/probe/ip/${ip} || echo TFTP ip FAILED\n", ctx.AdvertisedIP)
+	// More detailed probes — these use variable substitution. If
+	// the top-of-script probes hit but these don't, the issue is
+	// variable expansion specifically (one of net0/net1/ip/gateway
+	// is parse-erroring).
+	fmt.Fprintf(&buf, "chain --autofree http://%s/debug/probe/net0/${net0/mac:hexhyp} ||\n", addr)
+	w("echo HTTP_NET0_FAILED")
+	fmt.Fprintf(&buf, "chain --autofree tftp://%s/probe/net0/${net0/mac:hexhyp} ||\n", ctx.AdvertisedIP)
+	w("echo TFTP_NET0_FAILED")
 	w("")
 
 	machines := []fleet.Machine{}

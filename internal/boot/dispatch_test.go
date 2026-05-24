@@ -56,11 +56,12 @@ machines:
 	for _, want := range []string{
 		// Dispatch line for the user's MAC.
 		"iseq ${net0/mac:hexhyp} 58-47-ca-70-c7-c9 && goto m_venkat-1",
-		// v0.5.6: phone-home probes (HTTP + TFTP) before iseq dispatch.
+		// v0.5.7: simplest possible probes at the TOP of the script
+		// (no variable substitution, no banner echoes first).
 		"chain --autofree http://",
-		"/debug/probe/ping",
+		"/debug/probe/script-started",
 		"chain --autofree tftp://",
-		"/probe/ping",
+		"/probe/script-started",
 		// Per-machine block label.
 		":m_venkat-1",
 		// dhcp inside the arm (PXE expert fix #1).
