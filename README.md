@@ -53,18 +53,24 @@ script chainloads netboot.xyz (or whatever URL you point it at).
 
 ## Install
 
-**Prebuilt binaries** are published on the
-[GitHub Releases page](https://github.com/venkatamutyala/pxe-beacon/releases)
-for `linux-amd64`, `linux-arm64`, and `darwin-arm64`, with a
-`SHA256SUMS` file alongside. Each release is built from a `v*` tag by
-the `release` GitHub Actions workflow.
+**One-liner (recommended)** — detects your OS/arch, verifies SHA256,
+strips the macOS Gatekeeper quarantine xattr, and installs to the
+current directory:
 
 ```bash
-# pick the artifact for your OS/arch
-curl -sSLo pxe-beacon https://github.com/venkatamutyala/pxe-beacon/releases/latest/download/pxe-beacon-linux-amd64
-chmod +x pxe-beacon
-sudo ./pxe-beacon
+curl -sSL https://raw.githubusercontent.com/venkatamutyala/pxe-beacon/main/install.sh | sh
 ```
+
+Pin a version or override the install dir:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/venkatamutyala/pxe-beacon/main/install.sh | sh -s -- --version v0.1.2
+curl -sSL https://raw.githubusercontent.com/venkatamutyala/pxe-beacon/main/install.sh | sh -s -- --dir /usr/local/bin
+```
+
+Or pick from the [GitHub Releases page](https://github.com/venkatamutyala/pxe-beacon/releases)
+manually (`linux-amd64`, `linux-arm64`, `darwin-arm64`; SHA256SUMS
+alongside).
 
 **Build from source:**
 
