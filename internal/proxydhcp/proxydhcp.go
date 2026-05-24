@@ -62,19 +62,19 @@ const (
 // It exists so the listener can write a single decision-level log
 // line that names the stage, the parsed options, and the action.
 type Decision struct {
-	ClientMAC      string
-	VendorClass    string
-	UserClass      string
-	Archs          []iana.Arch
-	SelectedArch   iana.Arch
-	Stage          string
-	Transport      Transport
-	BootFile       string // option 67 value (filename or URL)
-	NextServer     string // option 66 / siaddr
-	Skip           SkipKind
-	SkipReason     string // human-readable; benign when SkipKind is SkipNotPXE
-	UnknownArch    bool   // we fell back because option 93 was unrecognized
-	IsIPXEStage    bool   // user-class said "iPXE"
+	ClientMAC    string
+	VendorClass  string
+	UserClass    string
+	Archs        []iana.Arch
+	SelectedArch iana.Arch
+	Stage        string
+	Transport    Transport
+	BootFile     string // option 67 value (filename or URL)
+	NextServer   string // option 66 / siaddr
+	Skip         SkipKind
+	SkipReason   string // human-readable; benign when SkipKind is SkipNotPXE
+	UnknownArch  bool   // we fell back because option 93 was unrecognized
+	IsIPXEStage  bool   // user-class said "iPXE"
 }
 
 // IsBenignSkip reports whether the skip is the expected

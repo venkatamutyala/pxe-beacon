@@ -48,9 +48,9 @@ type OfferTracker interface {
 // the same reason the BuildOffer purity rule does: it makes the live
 // path a thin shim and the unit tests faithful to production.
 type Listener struct {
-	opts   ServerOptions
-	log    *narrlog.Logger
-	srv67  *server4.Server
+	opts    ServerOptions
+	log     *narrlog.Logger
+	srv67   *server4.Server
 	srv4011 *server4.Server
 
 	pendingMu sync.Mutex

@@ -343,3 +343,96 @@ Decisions to flag for review:
   on the wire; the only thing they don't prove is that UEFI firmware
   accepts those bytes. That's a hardware question, not a code one.
 
+---
+
+## M5 — Polish — **PASS** (code) / **VM gate manual**
+
+What I did:
+- Cleaner startup banner: drop the box-drawing characters (alignment
+  was fragile), show a labelled key/value block with `interface`,
+  `advertised-ip`, ports for each service, chain URL, loglevel.
+- Friendlier `-help`: opens with what pxe-beacon is, lists flags,
+  closes with the same-segment / privileged-port reminder.
+- `-hint-after` flag wired through to the failure-path hint timer.
+- Graceful shutdown across all three goroutines with a 3-second
+  drain deadline so SIGINT no longer leaks goroutines.
+- `gofmt -s -w .` + `go vet ./...` clean.
+- `Makefile` with `make` (host build), `make test`, `make cross` for
+  linux/amd64, linux/arm64, darwin/arm64 (PLAN acceptance criteria),
+  `make run` (sudo), `make run-loopback` (Tier-1 smoke), `make clean`.
+  Honors `$(GO)` override so works when `go` isn't on the system PATH.
+- Version stamped into the binary via `-ldflags -X main.version=$(VERSION)`
+  from `git describe`.
+- `README.md` rewritten: what it is, hard constraints (broadcast,
+  same-segment, ports, Docker-on-macOS), install, run, what success
+  looks like in the log, the section-0 gotchas, architecture, test
+  tiers, license/attribution.
+
+Gate verification:
+
+```
+$ gofmt -l .                       # clean
+$ go vet ./...                     # clean
+$ make GO=/usr/local/go/bin/go test
+  ok  github.com/venkatamutyala/pxe-beacon/internal/httpd     0.435s
+  ok  github.com/venkatamutyala/pxe-beacon/internal/proxydhcp 0.208s
+  ok  github.com/venkatamutyala/pxe-beacon/internal/tftp      0.474s
+
+$ make GO=/usr/local/go/bin/go cross
+  -> dist/pxe-beacon-linux-amd64  (11 MB)
+  -> dist/pxe-beacon-linux-arm64  (10 MB)
+  -> dist/pxe-beacon-darwin-arm64 (10 MB)
+
+$ ./dist/pxe-beacon-linux-amd64 -version
+  pxe-beacon 7c645a0-dirty (linux/amd64)
+```
+
+Banner output:
+
+```
+pxe-beacon 7c645a0-dirty (linux/amd64)
+  interface     : enp1s0
+  advertised-ip : 127.0.0.1
+  proxyDHCP     : udp/67 + udp/4011 on 127.0.0.1
+  TFTP          : 127.0.0.1:6969
+  HTTP          : 127.0.0.1:8080 (chain script /boot.ipxe)
+  chain-url     : https://boot.netboot.xyz/menu.ipxe
+  loglevel      : debug
+embedded netboot.xyz.efi ready (1171456 bytes)
+```
+
+**PLAN M5 gate is "fresh clone → make → runs on Mac and a Linux
+box; VM boots to menu."** The "runs on Linux" and "make works" parts
+verified here. The "runs on Mac" part is a separate machine — the
+cross-compiled darwin/arm64 binary built clean, but actual macOS
+runtime is left for you to confirm. The "VM boots to menu" part is
+the M4 hardware gate; see `RUN.md` Path A.
+
+Decisions to flag for review:
+- **`-hint-after 10s` default.** Could be too aggressive on slow
+  networks (e.g. spinning up a VM that takes longer to load EFI). The
+  flag is there; raise it if it noisy in practice.
+- **WiFi heuristic** in `netinfo.looksWireless` matches prefixes
+  `wl`, `wlan`, `wlp`, `wlx`, `ath`, `ra`. macOS `en0` is intentionally
+  NOT matched — it's wireless on MacBooks but wired on other Macs, and
+  false-positive warnings would be more annoying than useful. Tighten
+  later if needed.
+
+---
+
+## Overall v1 status
+
+| Milestone | Code | Tier 0 | Tier 1 | Hardware gate |
+|-----------|------|--------|--------|---------------|
+| M0 Scaffold              | ✅ | n/a | n/a | n/a |
+| M1 proxyDHCP BuildOffer  | ✅ | ✅ 12 unit + 2 e2e | n/a | n/a |
+| M2 TFTP                  | ✅ | ✅ 4 tests | ✅ real `tftp` client | n/a |
+| M3 HTTP + chain script   | ✅ | ✅ 5 tests | ✅ `curl -I` + `curl` | n/a |
+| M4 End-to-end wiring     | ✅ | ✅ live three-server run | ✅ tcpdump + sockets | ⚠ manual (RUN.md) |
+| M5 Polish                | ✅ | ✅ gofmt/vet/test | ✅ banner+shutdown | ⚠ manual |
+
+**Total tests:** 23 (passing). Cross-compile to linux/amd64,
+linux/arm64, darwin/arm64 all succeed.
+
+**Hand-off:** start at `RUN.md` Path A to drive the QEMU+OVMF boot.
+

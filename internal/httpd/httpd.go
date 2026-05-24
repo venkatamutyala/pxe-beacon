@@ -30,22 +30,22 @@ type Tracker interface {
 
 // Options carries deployment config.
 type Options struct {
-	Listen          string // ":8080" or "127.0.0.1:8080"
-	AdvertisedIP    string // for templating into boot.ipxe
-	ChainURL        string // netboot.xyz menu URL by default
-	IPXEScriptPath  string // URL path the script is served at
-	IPXEScriptFile  string // optional path to override-on-disk template
-	SetCrossCert    bool   // true to add `set crosscert` (PLAN gotcha)
-	Logger          *narrlog.Logger
-	Tracker         Tracker
+	Listen         string // ":8080" or "127.0.0.1:8080"
+	AdvertisedIP   string // for templating into boot.ipxe
+	ChainURL       string // netboot.xyz menu URL by default
+	IPXEScriptPath string // URL path the script is served at
+	IPXEScriptFile string // optional path to override-on-disk template
+	SetCrossCert   bool   // true to add `set crosscert` (PLAN gotcha)
+	Logger         *narrlog.Logger
+	Tracker        Tracker
 }
 
 // Server is the pxe-beacon HTTP server.
 type Server struct {
-	opts   Options
-	log    *narrlog.Logger
-	mux    *http.ServeMux
-	tmpl   *template.Template
+	opts Options
+	log  *narrlog.Logger
+	mux  *http.ServeMux
+	tmpl *template.Template
 }
 
 // New builds the server but does not start it.
@@ -100,6 +100,7 @@ func loadTemplate(override string) (*template.Template, error) {
 // routes registers handlers. Two kinds:
 //   - GET /<ipxe-binary> : the iPXE binaries, for UEFI HTTP boot.
 //   - GET /boot.ipxe     : the chain script.
+//
 // A root handler also returns a tiny status page so curl localhost
 // works as a healthcheck and the operator gets a friendly hint.
 func (s *Server) routes() {

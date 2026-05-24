@@ -153,4 +153,3 @@ func kindForLeaf(leaf string) (assets.IPXEKind, bool) {
 	}
 	return 0, false
 }
-
