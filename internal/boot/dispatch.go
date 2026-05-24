@@ -113,25 +113,46 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	switch m.Profile.Boot {
 	case "debian-12":
 		mirror := "http://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot/debian-installer/amd64"
-		fmt.Fprintf(buf, "echo pxe-beacon: fetching Debian 12 d-i kernel from %s/linux\n", mirror)
+		fmt.Fprintf(buf, "echo pxe-beacon: ip=${ip} gw=${gateway} dns=${dns}\n")
+		fmt.Fprintf(buf, "echo pxe-beacon: fetching Debian 12 d-i kernel: %s/linux\n", mirror)
 		fmt.Fprintf(buf,
-			"kernel --name linux %s/linux auto=true priority=critical ip=dhcp url=%s %s ---\n",
+			"kernel --name linux %s/linux auto=true priority=critical ip=dhcp url=%s %s --- ||\n",
 			mirror, preseedURL, consoleArgs)
+		w("echo pxe-beacon: KERNEL FETCH FAILED — client cannot reach deb.debian.org over HTTP")
+		w("echo pxe-beacon: tried URL above; verify DNS + outbound HTTP from this NIC")
+		w("sleep 5")
+		w("shell")
+		fmt.Fprintf(buf, "echo pxe-beacon: fetching initrd: %s/initrd.gz\n", mirror)
 		fmt.Fprintf(buf, "initrd --name initrd.gz %s/initrd.gz ||\n", mirror)
-		w("echo pxe-beacon: initrd fetch failed; check HTTP to deb.debian.org && sleep 3 && shell")
+		w("echo pxe-beacon: INITRD FETCH FAILED — kernel got through but initrd did not")
+		w("sleep 5")
+		w("shell")
+		w("echo pxe-beacon: handing control to d-i (boot)...")
 		fmt.Fprintf(buf, "boot ||\n")
-		w("echo pxe-beacon: boot failed; check preseed URL reachability && sleep 3 && shell")
+		w("echo pxe-beacon: BOOT FAILED — kernel image rejected (cmdline / arch mismatch?)")
+		w("sleep 5")
+		w("shell")
 
 	case "debian-13":
 		mirror := "http://deb.debian.org/debian/dists/trixie/main/installer-amd64/current/images/netboot/debian-installer/amd64"
-		fmt.Fprintf(buf, "echo pxe-beacon: fetching Debian 13 d-i kernel from %s/linux\n", mirror)
+		fmt.Fprintf(buf, "echo pxe-beacon: ip=${ip} gw=${gateway} dns=${dns}\n")
+		fmt.Fprintf(buf, "echo pxe-beacon: fetching Debian 13 d-i kernel: %s/linux\n", mirror)
 		fmt.Fprintf(buf,
-			"kernel --name linux %s/linux auto=true priority=critical ip=dhcp url=%s %s ---\n",
+			"kernel --name linux %s/linux auto=true priority=critical ip=dhcp url=%s %s --- ||\n",
 			mirror, preseedURL, consoleArgs)
+		w("echo pxe-beacon: KERNEL FETCH FAILED — client cannot reach deb.debian.org over HTTP")
+		w("sleep 5")
+		w("shell")
+		fmt.Fprintf(buf, "echo pxe-beacon: fetching initrd: %s/initrd.gz\n", mirror)
 		fmt.Fprintf(buf, "initrd --name initrd.gz %s/initrd.gz ||\n", mirror)
-		w("echo pxe-beacon: initrd fetch failed; check HTTP to deb.debian.org && sleep 3 && shell")
+		w("echo pxe-beacon: INITRD FETCH FAILED")
+		w("sleep 5")
+		w("shell")
+		w("echo pxe-beacon: handing control to d-i (boot)...")
 		fmt.Fprintf(buf, "boot ||\n")
-		w("echo pxe-beacon: boot failed; check preseed URL reachability && sleep 3 && shell")
+		w("echo pxe-beacon: BOOT FAILED")
+		w("sleep 5")
+		w("shell")
 
 	case "ubuntu-22.04", "ubuntu-24.04":
 		assets := assetsBase(m.Profile.Boot)

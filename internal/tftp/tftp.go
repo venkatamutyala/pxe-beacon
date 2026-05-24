@@ -111,13 +111,13 @@ func (s *Server) readHandler(filename string, rf io.ReaderFrom) error {
 		logPath = fmt.Sprintf("%s (leaf=%s)", filename, leaf)
 	}
 
-	// autoexec.ipxe — operator override hook. If we have a
-	// redirector configured (fleet mode), serve it. Otherwise the
-	// legacy 404-as-benign behavior.
+	// autoexec.ipxe — operator override hook. In v0.5.0+ this is the
+	// per-MAC dispatch script (see internal/boot/dispatch.go). In
+	// -legacy-redirector mode it's the v0.4.x HTTP redirector stub.
 	if leaf == "autoexec.ipxe" {
 		if s.autoexec != nil {
 			body := s.autoexec()
-			s.log.Infof(`TFTP RRQ %q -> serving autoexec redirector (%d bytes)`, filename, len(body))
+			s.log.Infof(`TFTP RRQ %q -> serving autoexec script (%d bytes)`, filename, len(body))
 			if outSizer, ok := rf.(interface{ SetSize(int64) }); ok {
 				outSizer.SetSize(int64(len(body)))
 			}

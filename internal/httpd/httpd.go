@@ -61,6 +61,11 @@ type Options struct {
 	// autoinstall (the kernel + initrd + filesystem.squashfs that
 	// don't exist as flat HTTP files anywhere upstream).
 	DataDir string
+	// TFTPAutoexec returns the exact bytes TFTP serves for
+	// autoexec.ipxe. When non-nil, /debug/tftp/autoexec.ipxe returns
+	// the same content over HTTP (curl-friendly diagnostic for ops
+	// who can't easily run a TFTP client). v0.5.1+.
+	TFTPAutoexec func() []byte
 }
 
 // Server is the pxe-beacon HTTP server.
@@ -179,6 +184,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /status", s.handleStatusHTML)
 	s.mux.HandleFunc("GET /status.json", s.handleStatusJSON)
 	s.mux.HandleFunc("GET /assets/{target}/{file}", s.handleAsset)
+
+	// v0.5.1: debug route — returns the exact bytes TFTP would serve
+	// for autoexec.ipxe. macOS BSD `tftp` has known hangs talking to
+	// non-loopback IPs on the same host; curl-friendly diagnostic.
+	s.mux.HandleFunc("GET /debug/tftp/autoexec.ipxe", s.handleDebugAutoexec)
 
 	// Admin routes — loopback-only, CSRF-guarded on POST. Wildcard
 	// {name...} captures slash-containing template paths like
@@ -512,6 +522,21 @@ func (s *Server) handleInstallerDone(w http.ResponseWriter, r *http.Request) {
 // handleAsset serves a file from DataDir/<target>/<file>. The target
 // + file names are validated to reject path traversal (cache.AssetPath
 // does the check). Used by the Ubuntu autoexec templates to fetch
+// handleDebugAutoexec returns the same bytes TFTP serves for
+// autoexec.ipxe. Lets operators curl the dispatch script when the
+// macOS BSD tftp client hangs (a known issue talking to non-loopback
+// IPs on the same machine).
+func (s *Server) handleDebugAutoexec(w http.ResponseWriter, r *http.Request) {
+	if s.opts.TFTPAutoexec == nil {
+		http.Error(w, "TFTP autoexec not configured (start pxe-beacon with -config)", http.StatusNotFound)
+		return
+	}
+	body := s.opts.TFTPAutoexec()
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Pxe-Beacon-Note", "this is the EXACT byte stream TFTP serves for autoexec.ipxe")
+	_, _ = w.Write(body)
+}
+
 // vmlinuz / initrd / filesystem.squashfs that `pxe-beacon fetch`
 // previously extracted from the live-server ISO.
 func (s *Server) handleAsset(w http.ResponseWriter, r *http.Request) {

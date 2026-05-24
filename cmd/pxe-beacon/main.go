@@ -191,6 +191,7 @@ func main() {
 		Fleet:          fl,
 		FleetStatus:    statusTracker,
 		DataDir:        *flagDataDir,
+		TFTPAutoexec:   autoexecFn,
 	})
 	if err != nil {
 		log.Errorf("init http: %v", err)
