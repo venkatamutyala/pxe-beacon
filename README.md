@@ -140,13 +140,30 @@ machines:
 
 Built-in `boot:` values:
 
-| value          | what happens                                                                 |
-|----------------|------------------------------------------------------------------------------|
-| `menu`         | netboot.xyz interactive menu (default for unknown MACs)                      |
-| `ubuntu-22.04` | unattended Subiquity autoinstall via cloud-init                              |
-| `ubuntu-24.04` | unattended Subiquity autoinstall via cloud-init                              |
-| `debian-12`    | unattended debian-installer with NoCloud datasource (cloud-init)             |
-| `custom`       | serve the operator-provided `ipxe_script` file verbatim (Go-templated)       |
+| value          | side-files required           | what happens                                                                 |
+|----------------|-------------------------------|------------------------------------------------------------------------------|
+| `menu`         | —                             | netboot.xyz interactive menu (default for unknown MACs)                      |
+| `ubuntu-22.04` | `cloud_init:` (URLs TBD)      | Subiquity autoinstall via cloud-init — **kernel URL TBD, currently broken** |
+| `ubuntu-24.04` | `cloud_init:` (URLs TBD)      | Subiquity autoinstall via cloud-init — **kernel URL TBD, currently broken** |
+| `debian-12`    | `preseed:` (+optional `cloud_init:`) | unattended d-i via preseed; if `cloud_init:` is also set, cloud-init runs on first boot of the installed system (auto-bridged) |
+| `debian-13`    | `preseed:` (+optional `cloud_init:`) | same as `debian-12` but Trixie's kernel/initrd                       |
+| `custom`       | `ipxe_script:`                | serve the operator-provided iPXE script verbatim (Go-templated)              |
+
+**Debian preseed + cloud-init bridge.** Debian's d-i installer doesn't
+read cloud-init / NoCloud (verified May 2026 against Trixie's
+initrd — no cloud-init artifacts anywhere). To install Debian
+unattended you need a `preseed.cfg`. If you *also* provide a
+`cloud_init:` file, pxe-beacon appends a `late_command` to the served
+preseed that:
+1. apt-installs `cloud-init` on the target,
+2. drops your user-data + meta-data into `/var/lib/cloud/seed/nocloud/`,
+3. enables `cloud-init.service` so it runs on first boot.
+
+That gives you "one cloud-init file" semantics on Debian even though
+the installer itself is preseed-driven. See
+[`examples/debian-preseed.cfg`](./examples/debian-preseed.cfg) for a
+starting template — copy, edit user/password/disk to match your fleet
+policy, then reference it from `fleet.yaml`.
 
 A full working example lives in [`fleet.example.yaml`](./fleet.example.yaml)
 with cloud-init templates under [`examples/`](./examples/). Try it on

@@ -161,6 +161,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /autoinstall/{mac}/autoexec.ipxe", s.handleAutoexec)
 	s.mux.HandleFunc("GET /autoinstall/{mac}/user-data", s.handleUserData)
 	s.mux.HandleFunc("GET /autoinstall/{mac}/meta-data", s.handleMetaData)
+	s.mux.HandleFunc("GET /autoinstall/{mac}/preseed.cfg", s.handlePreseed)
 	s.mux.HandleFunc("POST /autoinstall/{mac}/done", s.handleInstallerDone)
 	s.mux.HandleFunc("GET /status", s.handleStatusHTML)
 	s.mux.HandleFunc("GET /status.json", s.handleStatusJSON)
@@ -293,6 +294,122 @@ func (s *Server) handleUserData(w http.ResponseWriter, r *http.Request) {
 		s.opts.Tracker.NoteServed("user-data-anon")
 	}
 	s.log.Infof("GET %s -> 200, %d bytes [client=%s]", r.URL.Path, len(body), labelOf(p.Name, mac))
+}
+
+// handlePreseed serves a Debian preseed.cfg for the requesting MAC.
+//
+// Three cases:
+//
+//  1. fleet entry has `preseed:` set → template + serve that file. If
+//     `cloud_init:` is ALSO set, append a `late_command` that
+//     installs cloud-init on the target and drops user-data /
+//     meta-data into /var/lib/cloud/seed/nocloud/ so cloud-init runs
+//     on first boot of the installed system.
+//  2. fleet entry has `cloud_init:` only (no preseed) → serve a
+//     "go interactive" stub so d-i prompts on the console; we don't
+//     auto-generate a full preseed (disk layouts / passwords / etc.
+//     are too opinionated to default).
+//  3. neither → same "interactive stub" — d-i goes interactive.
+//
+// The interactive stub is technically a valid (empty) preseed; d-i
+// fetches it, finds no answers, and prompts normally.
+func (s *Server) handlePreseed(w http.ResponseWriter, r *http.Request) {
+	if !s.fleetReady(w) {
+		return
+	}
+	mac := s.extractMAC(w, r)
+	if mac == "" {
+		return
+	}
+	p := s.opts.Fleet.Lookup(mac)
+
+	tvars := map[string]any{
+		"Name":         p.Name,
+		"MAC":          mac,
+		"MACHyp":       strings.ReplaceAll(mac, ":", "-"),
+		"AdvertisedIP": s.opts.AdvertisedIP,
+		"HTTPPort":     s.opts.HTTPPort,
+	}
+
+	var body []byte
+
+	if p.Preseed != "" {
+		raw, err := os.ReadFile(p.Preseed)
+		if err != nil {
+			s.log.Errorf("GET %s -> 500 read preseed: %v", r.URL.Path, err)
+			http.Error(w, fmt.Sprintf("read preseed: %v", err), http.StatusInternalServerError)
+			return
+		}
+		tmpl, err := template.New("preseed").Parse(string(raw))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("parse preseed template: %v", err), http.StatusInternalServerError)
+			return
+		}
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, tvars); err != nil {
+			http.Error(w, fmt.Sprintf("render preseed: %v", err), http.StatusInternalServerError)
+			return
+		}
+		body = buf.Bytes()
+
+		// Append the cloud-init bridge if a cloud_init file was
+		// also configured. We add it as an extra preseed directive
+		// rather than editing whatever the operator wrote — if
+		// their preseed already has a late_command we want both
+		// to run, and Debian preseed concatenates multiple
+		// late_command lines.
+		if p.CloudInit != "" {
+			bridge := renderCloudInitBridge(tvars)
+			if !bytes.HasSuffix(body, []byte("\n")) {
+				body = append(body, '\n')
+			}
+			body = append(body, bridge...)
+		}
+	} else {
+		// Stub — d-i fetches this, finds no preseed answers, falls
+		// through to interactive. Comment block tells the operator
+		// why and how to make it unattended.
+		body = []byte(`# pxe-beacon: no preseed configured for ` + mac + `
+# Set ` + "`preseed: ./your-preseed.cfg`" + ` in fleet.yaml to make
+# this an unattended install. See examples/debian-preseed.cfg.
+`)
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	_, _ = w.Write(body)
+	if s.opts.FleetStatus != nil {
+		// Mark the machine as having entered the install stage. Use
+		// the existing user-data-fetched event — preseed.cfg is the
+		// Debian-side analog of cloud-init's user-data.
+		s.opts.FleetStatus.Note(mac, fleet.EventUserDataFetched)
+	}
+	s.log.Infof("GET %s -> 200, %d bytes [client=%s, preseed=%t, cloud_init_bridge=%t]",
+		r.URL.Path, len(body), labelOf(p.Name, mac), p.Preseed != "", p.Preseed != "" && p.CloudInit != "")
+}
+
+// renderCloudInitBridge produces the late_command directive that
+// installs cloud-init on the target and seeds it with the operator's
+// user-data + meta-data. Runs on FIRST BOOT of the installed system,
+// not during d-i. Reuses pxe-beacon's existing /user-data and
+// /meta-data endpoints — they already exist for Ubuntu, so we just
+// fetch them again post-install.
+func renderCloudInitBridge(vars map[string]any) []byte {
+	body := fmt.Sprintf(`
+### cloud-init bridge — appended by pxe-beacon when fleet.yaml had cloud_init:
+### Runs on first boot of the installed system. Idempotent.
+d-i preseed/late_command string \
+  in-target apt-get update ; \
+  in-target apt-get install -y --no-install-recommends cloud-init wget ca-certificates ; \
+  in-target mkdir -p /var/lib/cloud/seed/nocloud ; \
+  in-target wget -q -O /var/lib/cloud/seed/nocloud/user-data http://%s:%d/autoinstall/%s/user-data ; \
+  in-target wget -q -O /var/lib/cloud/seed/nocloud/meta-data http://%s:%d/autoinstall/%s/meta-data ; \
+  in-target systemctl enable cloud-init.service cloud-config.service cloud-final.service cloud-init-local.service ;
+`,
+		vars["AdvertisedIP"], vars["HTTPPort"], vars["MACHyp"],
+		vars["AdvertisedIP"], vars["HTTPPort"], vars["MACHyp"],
+	)
+	return []byte(body)
 }
 
 // handleMetaData serves a minimal cloud-init meta-data document

@@ -413,6 +413,160 @@ func TestHTTP_FleetRoutes_404WithoutConfig(t *testing.T) {
 	}
 }
 
+func startFleetServerWithPreseed(t *testing.T) (string, *fleet.Tracker) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "user-data.yaml"),
+		[]byte("#cloud-config\nhostname: {{.Name}}\nphone_home: {url: http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}/done}\n"),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "preseed.cfg"),
+		[]byte(`# example preseed
+d-i debian-installer/locale string en_US.UTF-8
+d-i netcfg/get_hostname string {{.Name}}
+d-i passwd/username string ops
+`),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Two machines: one preseed-only, one preseed+cloud_init bridged.
+	if err := os.WriteFile(filepath.Join(dir, "fleet.yaml"), []byte(`
+machines:
+  - mac: 58:47:ca:70:c7:c9
+    name: deb-bridge
+    boot: debian-12
+    preseed: ./preseed.cfg
+    cloud_init: ./user-data.yaml
+  - mac: aa:bb:cc:dd:ee:01
+    name: deb-preseed-only
+    boot: debian-12
+    preseed: ./preseed.cfg
+  - mac: 11:22:33:44:55:66
+    name: deb-interactive
+    boot: debian-12
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logBuf := &bytes.Buffer{}
+	log := narrlog.New("test", narrlog.LevelDebug, logBuf)
+	f, err := fleet.Load(filepath.Join(dir, "fleet.yaml"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := fleet.NewTracker(f, 5*time.Second)
+
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	addr := ln.Addr().String()
+	_, portStr, _ := net.SplitHostPort(addr)
+	port, _ := strconv.Atoi(portStr)
+	_ = ln.Close()
+
+	s, err := New(Options{
+		Listen:       addr,
+		AdvertisedIP: "10.0.0.5",
+		HTTPPort:     port,
+		Logger:       log,
+		Fleet:        f,
+		FleetStatus:  tr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = s.Serve(ctx); close(done) }()
+	time.Sleep(80 * time.Millisecond)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+		t.Logf("log dump:\n%s", logBuf.String())
+	})
+	return addr, tr
+}
+
+func TestHTTP_Preseed_RendersOperatorFile(t *testing.T) {
+	addr, _ := startFleetServerWithPreseed(t)
+	resp, err := http.Get("http://" + addr + "/autoinstall/aa-bb-cc-dd-ee-01/preseed.cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	for _, want := range []string{
+		"d-i debian-installer/locale",
+		"d-i netcfg/get_hostname string deb-preseed-only", // templated name
+		"d-i passwd/username string ops",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("preseed missing %q:\n%s", want, s)
+		}
+	}
+	// No bridge for this machine — no cloud_init configured.
+	if strings.Contains(s, "cloud-init bridge") {
+		t.Errorf("preseed-only machine should NOT have the cloud-init bridge:\n%s", s)
+	}
+}
+
+func TestHTTP_Preseed_AppendsCloudInitBridge(t *testing.T) {
+	addr, _ := startFleetServerWithPreseed(t)
+	resp, err := http.Get("http://" + addr + "/autoinstall/58-47-ca-70-c7-c9/preseed.cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+
+	// Operator's preseed content present.
+	if !strings.Contains(s, "d-i debian-installer/locale") {
+		t.Errorf("operator preseed not present:\n%s", s)
+	}
+	if !strings.Contains(s, "d-i netcfg/get_hostname string deb-bridge") {
+		t.Errorf("operator preseed not templated with this machine's name:\n%s", s)
+	}
+
+	// Bridge appended.
+	for _, want := range []string{
+		"cloud-init bridge",
+		"d-i preseed/late_command string",
+		"apt-get install -y --no-install-recommends cloud-init",
+		"/var/lib/cloud/seed/nocloud/user-data",
+		"/var/lib/cloud/seed/nocloud/meta-data",
+		"http://10.0.0.5:", // AdvertisedIP templated into the wget URL
+		"58-47-ca-70-c7-c9/user-data",
+		"systemctl enable cloud-init.service",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("bridge missing %q:\n%s", want, s)
+		}
+	}
+}
+
+func TestHTTP_Preseed_InteractiveStubWhenNoPreseed(t *testing.T) {
+	addr, _ := startFleetServerWithPreseed(t)
+	resp, err := http.Get("http://" + addr + "/autoinstall/11-22-33-44-55-66/preseed.cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	if !strings.Contains(s, "no preseed configured") {
+		t.Errorf("expected interactive-stub explanation:\n%s", s)
+	}
+	if strings.Contains(s, "d-i debian-installer/locale") {
+		t.Errorf("interactive stub should NOT include preseed directives:\n%s", s)
+	}
+}
+
 func TestHTTP_Autoexec_RejectsBadMAC(t *testing.T) {
 	addr, _, _, _ := startFleetServer(t)
 	resp, err := http.Get("http://" + addr + "/autoinstall/not-a-mac/autoexec.ipxe")

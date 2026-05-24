@@ -670,6 +670,98 @@ URLs (which they should). Adding a TBD `make verify-urls` target.
 
 ---
 
+## v0.2.2 — `debian-13` (Trixie) target
+
+Trivial follow-up to v0.2.1: add a `debian-13` target mirroring
+`debian-12` but pointing at Trixie's netboot URL
+(`dists/trixie/main/installer-amd64/current/images/netboot/...`).
+
+Background investigation (May 2026): downloaded Trixie's netboot
+initrd, extracted 1739 files, grepped for cloud-init / NoCloud
+markers — found **none**. Mainline d-i in Trixie has zero cloud-init
+support. So Debian 12 and 13 share one preseed-based code path
+(landed in v0.3); the only per-release thing is the mirror URL.
+
+`debian-13` template + tests added; fleet.ValidBootTargets + boot.IsBuiltIn
+extended. Same caveats as v0.2.1: boots d-i interactively until v0.3.
+
+---
+
+## v0.3.0 — preseed.cfg + cloud-init bridge for Debian
+
+The headline v0.2 feature ("unattended installs") finally works for
+Debian.
+
+### What landed
+
+- **`fleet.Profile` gains a `Preseed` field.** YAML key `preseed:` in
+  fleet.yaml — path to an operator-supplied preseed.cfg. Resolved
+  relative to fleet.yaml's directory; validated (`os.Stat`) at load.
+- **`validateProfile` re-split per OS family.** Ubuntu requires
+  `cloud_init:`. Debian no longer requires it — it requires
+  `preseed:` for unattended (and accepts `cloud_init:` *on top* for
+  the bridge). Missing both = interactive boot, allowed.
+- **New HTTP route `GET /autoinstall/{mac}/preseed.cfg`** in
+  `internal/httpd/httpd.go`:
+  - With `preseed:` set: serves the operator file Go-templated
+    with the same `{Name, MAC, MACHyp, AdvertisedIP, HTTPPort}` vars
+    user-data has.
+  - With BOTH `preseed:` and `cloud_init:` set: appends a
+    `d-i preseed/late_command` that installs cloud-init on the
+    target, drops user-data + meta-data into
+    `/var/lib/cloud/seed/nocloud/`, and enables
+    `cloud-init.service` — so cloud-init runs on first boot of the
+    installed system.
+  - Without `preseed:`: serves a polite "go interactive" stub.
+  - Fires `EventUserDataFetched` on the status tracker (the
+    Debian-side analog of cloud-init user-data fetch).
+- **`debian-12` and `debian-13` iPXE templates** updated. The
+  kernel cmdline now passes
+  `auto=true priority=critical url=http://server:port/autoinstall/<mac>/preseed.cfg`
+  to d-i. No more cloud-init / NoCloud params (since d-i ignores
+  them anyway).
+- **`examples/debian-preseed.cfg`** — annotated starter preseed.
+  Operators copy/edit to taste. The cloud-init bridge is added
+  automatically by pxe-beacon — operators don't need to write
+  late_command themselves.
+- `fleet.example.yaml` + README updated with the preseed + bridge
+  story; the `boot:` value table now lists side-file requirements
+  per target.
+
+### Tests (4 new, all green)
+
+- `TestHTTP_Preseed_RendersOperatorFile` — operator's preseed
+  served with template vars resolved; **no** bridge appended when
+  only `preseed:` is set.
+- `TestHTTP_Preseed_AppendsCloudInitBridge` — both fields set →
+  operator content first, bridge `late_command` appended with the
+  correct AdvertisedIP / port / hyphen-MAC.
+- `TestHTTP_Preseed_InteractiveStubWhenNoPreseed` — neither set →
+  short comment-only stub, no preseed directives.
+
+### What a Debian boot now looks like with v0.3
+
+1. UEFI DHCP → pxe-beacon OFFER → TFTP netboot.xyz-snponly.efi.
+2. iPXE loads, fetches TFTP `autoexec.ipxe` (the redirector), HTTP
+   `autoexec.ipxe` (the per-MAC template).
+3. iPXE boots Debian d-i with `url=…/preseed.cfg`.
+4. d-i fetches preseed.cfg (pxe-beacon serves operator file +
+   bridge); runs unattended.
+5. d-i late_command writes user-data + meta-data to
+   `/var/lib/cloud/seed/nocloud/`, enables cloud-init.
+6. Machine reboots into the installed system.
+7. cloud-init reads NoCloud seed dir, runs operator's user-data —
+   installs packages, runs runcmd, calls phone_home.
+8. pxe-beacon's `/status` flips to `installer-done`.
+
+### Out of scope for v0.3 (still deferred)
+
+- Ubuntu Subiquity URLs (v0.4 `pxe-beacon fetch <target>`).
+- A real `discover.pcap` test fixture.
+- Operator UI for fleet edits (v0.x+, not on roadmap).
+
+---
+
 ## v0.1.3 — serve `netboot.xyz-snponly.efi` for x86_64 UEFI
 
 The v0.1.2 user reported that PXE-booting an AMI/Phoenix-firmware

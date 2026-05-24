@@ -50,6 +50,14 @@ type Profile struct {
 	// when boot==menu or boot==custom.
 	CloudInit string
 
+	// Preseed is an absolute path to a Debian preseed.cfg. Used for
+	// debian-12 / debian-13 unattended installs (d-i doesn't read
+	// cloud-init/NoCloud — verified May 2026). When CloudInit is
+	// also set, the preseed gets a late_command bridge appended that
+	// wires cloud-init on the installed system. Empty for
+	// Ubuntu / menu / custom.
+	Preseed string
+
 	// IPXEScript is an absolute path to the raw iPXE script the
 	// operator wants served verbatim. Only meaningful when
 	// boot==custom; empty otherwise.
@@ -69,6 +77,7 @@ type configFile struct {
 type defaultsEntry struct {
 	Boot       string `yaml:"boot"`
 	CloudInit  string `yaml:"cloud_init"`
+	Preseed    string `yaml:"preseed"`
 	IPXEScript string `yaml:"ipxe_script"`
 }
 
@@ -77,6 +86,7 @@ type machineYAML struct {
 	Name       string `yaml:"name"`
 	Boot       string `yaml:"boot"`
 	CloudInit  string `yaml:"cloud_init"`
+	Preseed    string `yaml:"preseed"`
 	IPXEScript string `yaml:"ipxe_script"`
 }
 
@@ -153,6 +163,7 @@ func (f *Fleet) reload() error {
 	defProfile := Profile{
 		Boot:       cfg.Defaults.Boot,
 		CloudInit:  resolvePath(baseDir, cfg.Defaults.CloudInit),
+		Preseed:    resolvePath(baseDir, cfg.Defaults.Preseed),
 		IPXEScript: resolvePath(baseDir, cfg.Defaults.IPXEScript),
 		IsDefault:  true,
 	}
@@ -184,6 +195,7 @@ func (f *Fleet) reload() error {
 			Boot:       m.Boot,
 			Name:       m.Name,
 			CloudInit:  resolvePath(baseDir, m.CloudInit),
+			Preseed:    resolvePath(baseDir, m.Preseed),
 			IPXEScript: resolvePath(baseDir, m.IPXEScript),
 		}
 		if err := validateProfile(p, ctx); err != nil {
@@ -214,16 +226,35 @@ func validateProfile(p Profile, ctx string) error {
 		if _, err := os.Stat(p.IPXEScript); err != nil {
 			return fmt.Errorf("%s: ipxe_script %s: %w", ctx, p.IPXEScript, err)
 		}
-	case "ubuntu-22.04", "ubuntu-24.04", "debian-12", "debian-13":
-		// Autoinstall targets need a cloud-init user-data file.
-		// Refusing to start is intentional — see PROGRESS.md / the
-		// roadmap: we don't ship a default credential.
+	case "ubuntu-22.04", "ubuntu-24.04":
+		// Ubuntu's Subiquity reads cloud-init / NoCloud natively.
 		if p.CloudInit == "" {
 			return fmt.Errorf("%s: boot=%s requires cloud_init (a user-data file with a credential / SSH key)",
 				ctx, p.Boot)
 		}
 		if _, err := os.Stat(p.CloudInit); err != nil {
 			return fmt.Errorf("%s: cloud_init %s: %w", ctx, p.CloudInit, err)
+		}
+	case "debian-12", "debian-13":
+		// Debian's mainline d-i uses preseed.cfg, NOT cloud-init —
+		// verified in v0.3 dev by extracting the Trixie initrd.
+		// For unattended installs operator MUST provide preseed.
+		// cloud_init is optional and, when present, is bridged onto
+		// the installed system via preseed's late_command (cloud-init
+		// runs on first boot of the installed OS).
+		//
+		// Without preseed, boot still works but goes interactive —
+		// we allow that for "I'm just confirming the chain works"
+		// scenarios, just warn at load time elsewhere.
+		if p.Preseed != "" {
+			if _, err := os.Stat(p.Preseed); err != nil {
+				return fmt.Errorf("%s: preseed %s: %w", ctx, p.Preseed, err)
+			}
+		}
+		if p.CloudInit != "" {
+			if _, err := os.Stat(p.CloudInit); err != nil {
+				return fmt.Errorf("%s: cloud_init %s: %w", ctx, p.CloudInit, err)
+			}
 		}
 	case "menu":
 		// No required side-files.

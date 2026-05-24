@@ -105,7 +105,8 @@ func TestRenderAutoexec_Debian12(t *testing.T) {
 	for _, want := range []string{
 		"#!ipxe",
 		"bookworm",
-		"ds=nocloud-net",
+		"url=", // preseed URL — v0.3 onwards
+		"preseed.cfg",
 		"58-47-ca-70-c7-c9",
 	} {
 		if !strings.Contains(s, want) {
