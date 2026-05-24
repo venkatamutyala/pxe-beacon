@@ -167,6 +167,26 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	}
 	consoleArgs := "console=tty0 console=ttyS0,115200n8"
 
+	// v0.6.0: when -client-netmask was used to widen iPXE's netmask
+	// for cross-/24 routing to pxe-beacon, we also need to pass the
+	// widened netmask through to the Linux kernel. d-i / Subiquity
+	// re-DHCP after kernel boot and would otherwise get the same
+	// broken /24 from the DHCP server, making /preseed.cfg fetch
+	// from pxe-beacon (off the /24) fail.
+	//
+	// Kernel `ip=` cmdline syntax per
+	// Documentation/admin-guide/nfs/nfsroot.rst:
+	//   ip=client-ip:server-ip:gw:netmask:hostname:device:autoconf
+	//
+	// We use iPXE variable substitution (${ip}, ${gateway}) so the
+	// values are the ones iPXE actually resolved at boot. autoconf
+	// is `none` (static), so the kernel doesn't re-DHCP and we keep
+	// the widened netmask.
+	ipArg := "ip=dhcp"
+	if ctx.ClientNetmask != "" {
+		ipArg = fmt.Sprintf("ip=${ip}::${gateway}:%s:::none", ctx.ClientNetmask)
+	}
+
 	w("")
 	fmt.Fprintf(buf, ":%s\n", label)
 	fmt.Fprintf(buf, "echo pxe-beacon: %s (%s) -> %s\n", name, m.MAC, m.Profile.Boot)
@@ -190,8 +210,8 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 		fmt.Fprintf(buf, "echo pxe-beacon: ip=${ip} gw=${gateway} dns=${dns}\n")
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching Debian 12 d-i kernel: %s/linux\n", mirror)
 		fmt.Fprintf(buf,
-			"kernel --name linux %s/linux auto=true priority=critical ip=dhcp url=%s %s --- || goto %s_fail_kernel\n",
-			mirror, preseedURL, consoleArgs, label)
+			"kernel --name linux %s/linux auto=true priority=critical %s url=%s %s --- || goto %s_fail_kernel\n",
+			mirror, ipArg, preseedURL, consoleArgs, label)
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching initrd: %s/initrd.gz\n", mirror)
 		fmt.Fprintf(buf, "initrd --name initrd.gz %s/initrd.gz || goto %s_fail_initrd\n", mirror, label)
 		w("echo pxe-beacon: handing control to d-i (boot)...")
@@ -203,8 +223,8 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 		fmt.Fprintf(buf, "echo pxe-beacon: ip=${ip} gw=${gateway} dns=${dns}\n")
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching Debian 13 d-i kernel: %s/linux\n", mirror)
 		fmt.Fprintf(buf,
-			"kernel --name linux %s/linux auto=true priority=critical ip=dhcp url=%s %s --- || goto %s_fail_kernel\n",
-			mirror, preseedURL, consoleArgs, label)
+			"kernel --name linux %s/linux auto=true priority=critical %s url=%s %s --- || goto %s_fail_kernel\n",
+			mirror, ipArg, preseedURL, consoleArgs, label)
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching initrd: %s/initrd.gz\n", mirror)
 		fmt.Fprintf(buf, "initrd --name initrd.gz %s/initrd.gz || goto %s_fail_initrd\n", mirror, label)
 		w("echo pxe-beacon: handing control to d-i (boot)...")
@@ -220,8 +240,8 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 		// it Subiquity prompts. Order: cmdline args, then ---, then
 		// initrd.
 		fmt.Fprintf(buf,
-			"kernel --name vmlinuz %s/vmlinuz initrd=initrd ip=dhcp ipv6.disable=1 boot=casper url=%s/filesystem.squashfs %s autoinstall ds=nocloud-net\\;s=%s --- || goto %s_fail_kernel\n",
-			assets, assets, consoleArgs, autoinstallBase, label)
+			"kernel --name vmlinuz %s/vmlinuz initrd=initrd %s ipv6.disable=1 boot=casper url=%s/filesystem.squashfs %s autoinstall ds=nocloud-net\\;s=%s --- || goto %s_fail_kernel\n",
+			assets, ipArg, assets, consoleArgs, autoinstallBase, label)
 		fmt.Fprintf(buf, "initrd --name initrd %s/initrd || goto %s_fail_initrd\n", assets, label)
 		w("echo pxe-beacon: handing control to Subiquity (boot)...")
 		fmt.Fprintf(buf, "boot || goto %s_fail_boot\n", label)

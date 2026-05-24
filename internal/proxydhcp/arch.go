@@ -57,7 +57,7 @@ var archTable = map[iana.Arch]ArchProfile{
 		Arch:      iana.INTEL_X86PC,
 		Transport: TransportTFTP,
 		IPXEKind:  assets.IPXELegacyBIOS,
-		BootFile:  "netboot.xyz.kpxe",
+		BootFile:  "undionly.kpxe",
 	},
 	// UEFI x86_64 — TFTP, snponly build. The most common modern PXE
 	// arch (0x07). We deliberately serve the SNP-only build (not the
@@ -73,14 +73,14 @@ var archTable = map[iana.Arch]ArchProfile{
 		Arch:      iana.EFI_X86_64,
 		Transport: TransportTFTP,
 		IPXEKind:  assets.IPXESNPOnly,
-		BootFile:  "netboot.xyz-snponly.efi",
+		BootFile:  "snponly.efi",
 	},
 	// UEFI ARM64 — TFTP, arm64 EFI build.
 	iana.EFI_ARM64: {
 		Arch:      iana.EFI_ARM64,
 		Transport: TransportTFTP,
 		IPXEKind:  assets.IPXEARM64,
-		BootFile:  "netboot.xyz-arm64.efi",
+		BootFile:  "ipxe-arm64.efi",
 	},
 	// UEFI HTTP-boot variants — firmware fetches over HTTP directly.
 	// option-93 0x10 (16) is x86_64 HTTP boot; this is what the PLAN
@@ -90,13 +90,13 @@ var archTable = map[iana.Arch]ArchProfile{
 		Arch:      iana.EFI_X86_64_HTTP,
 		Transport: TransportHTTP,
 		IPXEKind:  assets.IPXESNPOnly,
-		BootFile:  "netboot.xyz-snponly.efi",
+		BootFile:  "snponly.efi",
 	},
 	iana.EFI_ARM64_HTTP: {
 		Arch:      iana.EFI_ARM64_HTTP,
 		Transport: TransportHTTP,
 		IPXEKind:  assets.IPXEARM64,
-		BootFile:  "netboot.xyz-arm64.efi",
+		BootFile:  "ipxe-arm64.efi",
 	},
 	// EFI IA32 (some thin clients): TFTP, but we don't have an ia32
 	// build embedded; serve the EFI x86_64 SNP-only build as a best-
@@ -105,7 +105,7 @@ var archTable = map[iana.Arch]ArchProfile{
 		Arch:      iana.EFI_IA32,
 		Transport: TransportTFTP,
 		IPXEKind:  assets.IPXESNPOnly,
-		BootFile:  "netboot.xyz-snponly.efi",
+		BootFile:  "snponly.efi",
 	},
 }
 

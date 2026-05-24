@@ -75,8 +75,8 @@ func TestBuildOffer_EFIx64_TFTP(t *testing.T) {
 	if dec.Transport != TransportTFTP {
 		t.Errorf("transport = %s, want TFTP", dec.Transport)
 	}
-	if dec.BootFile != "netboot.xyz-snponly.efi" {
-		t.Errorf("bootfile = %q, want netboot.xyz-snponly.efi", dec.BootFile)
+	if dec.BootFile != "snponly.efi" {
+		t.Errorf("bootfile = %q, want snponly.efi", dec.BootFile)
 	}
 	if got := reply.MessageType(); got != dhcpv4.MessageTypeOffer {
 		t.Errorf("reply msg type = %s, want OFFER", got)
@@ -87,8 +87,8 @@ func TestBuildOffer_EFIx64_TFTP(t *testing.T) {
 	if got := reply.YourIPAddr.String(); got != "0.0.0.0" {
 		t.Errorf("yiaddr = %s, want 0.0.0.0 (proxyDHCP MUST NOT assign IPs)", got)
 	}
-	if got := reply.BootFileName; got != "netboot.xyz-snponly.efi" {
-		t.Errorf("bootfile name = %q, want netboot.xyz-snponly.efi", got)
+	if got := reply.BootFileName; got != "snponly.efi" {
+		t.Errorf("bootfile name = %q, want snponly.efi", got)
 	}
 	if got := reply.TFTPServerName(); got != "10.0.0.5" {
 		t.Errorf("opt 66 tftp server = %q, want 10.0.0.5", got)
@@ -113,7 +113,7 @@ func TestBuildOffer_HTTPBoot_x64(t *testing.T) {
 	if dec.Transport != TransportHTTP {
 		t.Errorf("transport = %s, want HTTP", dec.Transport)
 	}
-	wantURL := "http://10.0.0.5:8080/netboot.xyz-snponly.efi"
+	wantURL := "http://10.0.0.5:8080/snponly.efi"
 	if reply.BootFileName != wantURL {
 		t.Errorf("bootfile URL = %q, want %q", reply.BootFileName, wantURL)
 	}
@@ -135,8 +135,8 @@ func TestBuildOffer_ARM64_TFTP(t *testing.T) {
 	if dec.Stage != StageFirmwareTFTP {
 		t.Errorf("stage = %q, want firmware-TFTP", dec.Stage)
 	}
-	if dec.BootFile != "netboot.xyz-arm64.efi" {
-		t.Errorf("bootfile = %q, want netboot.xyz-arm64.efi", dec.BootFile)
+	if dec.BootFile != "ipxe-arm64.efi" {
+		t.Errorf("bootfile = %q, want ipxe-arm64.efi", dec.BootFile)
 	}
 }
 
@@ -149,8 +149,8 @@ func TestBuildOffer_ARM64_HTTPBoot(t *testing.T) {
 	if dec.Stage != StageFirmwareHTTP {
 		t.Errorf("stage = %q, want firmware-HTTP", dec.Stage)
 	}
-	if !strings.HasSuffix(reply.BootFileName, "/netboot.xyz-arm64.efi") {
-		t.Errorf("bootfile = %q, want /netboot.xyz-arm64.efi suffix", reply.BootFileName)
+	if !strings.HasSuffix(reply.BootFileName, "/ipxe-arm64.efi") {
+		t.Errorf("bootfile = %q, want /ipxe-arm64.efi suffix", reply.BootFileName)
 	}
 }
 
@@ -176,8 +176,8 @@ func TestBuildOffer_LegacyBIOS(t *testing.T) {
 	if dec.Transport != TransportTFTP {
 		t.Errorf("transport = %s, want TFTP", dec.Transport)
 	}
-	if dec.BootFile != "netboot.xyz.kpxe" {
-		t.Errorf("bootfile = %q, want netboot.xyz.kpxe", dec.BootFile)
+	if dec.BootFile != "undionly.kpxe" {
+		t.Errorf("bootfile = %q, want undionly.kpxe", dec.BootFile)
 	}
 }
 

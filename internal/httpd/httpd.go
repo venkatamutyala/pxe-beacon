@@ -66,6 +66,20 @@ type Options struct {
 	// the same content over HTTP (curl-friendly diagnostic for ops
 	// who can't easily run a TFTP client). v0.5.1+.
 	TFTPAutoexec func() []byte
+	// IPXEDispatch, when non-nil, makes /boot.ipxe (the iPXE-stage
+	// OFFER URL) return the per-MAC dispatch script INSTEAD of the
+	// static chain template. v0.6.0+: vanilla iPXE (no EMBED) chains
+	// to /boot.ipxe at iPXE-stage; this is where the dispatch logic
+	// needs to live for that path to work. When nil, /boot.ipxe
+	// returns the v0.1.3-era static template (chain to ChainURL).
+	IPXEDispatch func() []byte
+	// ClientNetmask, when non-empty (e.g. "255.255.0.0"), is the
+	// widened netmask the operator chose for cross-/24 routing on
+	// flat /16+ networks. It propagates into preseed late_commands
+	// so the installed system can install a link-scope route to
+	// the wider network — without that, cloud-init phone_home back
+	// to pxe-beacon fails after first reboot. v0.6.0+.
+	ClientNetmask string
 }
 
 // Server is the pxe-beacon HTTP server.
@@ -168,6 +182,7 @@ func (s *Server) routes() {
 	// names, and the proxyDHCP OFFER also uses the canonical name,
 	// but we want curl to "just work" regardless.
 	s.mux.HandleFunc("/ipxe.efi", s.serveIPXE(assets.IPXEEFIx64))
+	s.mux.HandleFunc("/snponly.efi", s.serveIPXE(assets.IPXESNPOnly))
 	s.mux.HandleFunc("/ipxe-arm64.efi", s.serveIPXE(assets.IPXEARM64))
 	s.mux.HandleFunc("/undionly.kpxe", s.serveIPXE(assets.IPXELegacyBIOS))
 
@@ -380,11 +395,13 @@ func (s *Server) handlePreseed(w http.ResponseWriter, r *http.Request) {
 	p := s.opts.Fleet.Lookup(mac)
 
 	tvars := map[string]any{
-		"Name":         p.Name,
-		"MAC":          mac,
-		"MACHyp":       strings.ReplaceAll(mac, ":", "-"),
-		"AdvertisedIP": s.opts.AdvertisedIP,
-		"HTTPPort":     s.opts.HTTPPort,
+		"Name":             p.Name,
+		"MAC":              mac,
+		"MACHyp":           strings.ReplaceAll(mac, ":", "-"),
+		"AdvertisedIP":     s.opts.AdvertisedIP,
+		"HTTPPort":         s.opts.HTTPPort,
+		"ClientNetmask":    s.opts.ClientNetmask,
+		"WiderNetworkCIDR": widerNetworkCIDR(s.opts.AdvertisedIP, s.opts.ClientNetmask),
 	}
 
 	var body []byte
@@ -533,6 +550,36 @@ func (s *Server) handleInstallerDone(w http.ResponseWriter, r *http.Request) {
 // handleAsset serves a file from DataDir/<target>/<file>. The target
 // + file names are validated to reject path traversal (cache.AssetPath
 // does the check). Used by the Ubuntu autoexec templates to fetch
+// widerNetworkCIDR computes the CIDR of the network shared by
+// AdvertisedIP and ClientNetmask. e.g.
+//
+//	("10.69.69.218", "255.255.0.0") -> "10.69.0.0/16"
+//
+// Used by the preseed late_command to install a link-scope route
+// on the installed system so cloud-init phone_home can reach
+// pxe-beacon on cross-/24 networks. Returns "" if inputs are
+// unparseable or netmask is empty.
+func widerNetworkCIDR(advertisedIP, netmask string) string {
+	if netmask == "" {
+		return ""
+	}
+	ip := net.ParseIP(advertisedIP)
+	if ip == nil {
+		return ""
+	}
+	ip = ip.To4()
+	if ip == nil {
+		return ""
+	}
+	mask := net.IPMask(net.ParseIP(netmask).To4())
+	if len(mask) != 4 {
+		return ""
+	}
+	network := ip.Mask(mask)
+	ones, _ := mask.Size()
+	return fmt.Sprintf("%s/%d", network.String(), ones)
+}
+
 // handleDebugProbe is the simpler path-based variant of the iPXE
 // phone-home. Lets the dispatch script call multiple chains with
 // per-key URLs that contain no `&` characters at all — robust to
@@ -832,18 +879,29 @@ type scriptVars struct {
 }
 
 func (s *Server) handleScript(w http.ResponseWriter, r *http.Request) {
-	var buf bytes.Buffer
-	err := s.tmpl.Execute(&buf, scriptVars{
-		AdvertisedIP: s.opts.AdvertisedIP,
-		ChainURL:     s.opts.ChainURL,
-		SetCrossCert: s.opts.SetCrossCert,
-	})
-	if err != nil {
-		s.log.Errorf("template render: %v", err)
-		http.Error(w, "template error", http.StatusInternalServerError)
-		return
+	var body []byte
+	// v0.6.0: when a fleet config is loaded, /boot.ipxe serves the
+	// per-MAC dispatch script. vanilla iPXE (no EMBED) chains to this
+	// URL at iPXE-stage per our proxyDHCP OFFER, so the dispatch logic
+	// must live here for that boot path to work. The legacy template
+	// path (chain to ChainURL = netboot.xyz menu) is preserved for
+	// the no-config single-machine case.
+	if s.opts.IPXEDispatch != nil {
+		body = s.opts.IPXEDispatch()
+	} else {
+		var buf bytes.Buffer
+		err := s.tmpl.Execute(&buf, scriptVars{
+			AdvertisedIP: s.opts.AdvertisedIP,
+			ChainURL:     s.opts.ChainURL,
+			SetCrossCert: s.opts.SetCrossCert,
+		})
+		if err != nil {
+			s.log.Errorf("template render: %v", err)
+			http.Error(w, "template error", http.StatusInternalServerError)
+			return
+		}
+		body = buf.Bytes()
 	}
-	body := buf.Bytes()
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	if r.Method == http.MethodHead {

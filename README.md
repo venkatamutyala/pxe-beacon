@@ -341,12 +341,39 @@ only in `listener.go`. This is what makes the primary test loop
 
 ---
 
+## Threat model — lab / trusted-LAN only
+
+PXE booting is fundamentally trust-the-network. The protocol has no
+authentication: any device on the same L2 broadcast domain can race
+DHCP responses, redirect TFTP filenames, or substitute boot files.
+`pxe-beacon` is designed for **trusted LANs** — your home lab, a
+dedicated provisioning VLAN at the office, a controlled datacenter
+rack — not arbitrary corporate Wi-Fi or shared networks.
+
+Specific risks if you ignore this:
+
+- **Rogue proxyDHCP racing**: an attacker on the LAN can answer
+  faster than `pxe-beacon` and redirect clients to attacker-controlled
+  iPXE/kernel.
+- **TFTP / HTTP without integrity**: the iPXE binary, autoexec.ipxe
+  dispatch script, and preseed.cfg all travel over the wire
+  unauthenticated. On-path tampering is possible.
+- **No UEFI SecureBoot support**: vanilla iPXE shipped by
+  `pxe-beacon` is unsigned. On SecureBoot-enabled clients it will
+  refuse to load.
+- **Unauthenticated cloud-init phone-home**: any LAN client can
+  POST `/autoinstall/<mac>/done` and flip a machine's state.
+
+For production fleet management on an untrusted segment, run
+`pxe-beacon` on a dedicated VLAN that's only reachable from the
+machines you intend to provision.
+
 ## License & attribution
 
 `pxe-beacon` itself is MIT-licensed (see [LICENSE](./LICENSE)).
 
-The embedded netboot.xyz / iPXE binaries are GPLv2+. Their source URLs
-and versions are recorded in
-[`internal/assets/ipxe/VERSIONS.md`](./internal/assets/ipxe/VERSIONS.md);
-upstream is <https://github.com/ipxe/ipxe> and
-<https://netboot.xyz>.
+The embedded iPXE binaries are GPLv2+. v0.6.0+ ships **vanilla
+upstream iPXE** (no `EMBED`), built from
+<https://github.com/ipxe/ipxe>. Source pin + reproducibility notes
+are in
+[`internal/assets/ipxe/VERSIONS.md`](./internal/assets/ipxe/VERSIONS.md).

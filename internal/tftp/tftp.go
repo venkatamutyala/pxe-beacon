@@ -176,7 +176,7 @@ func (s *Server) readHandler(filename string, rf io.ReaderFrom) error {
 
 	kind, ok := kindForLeaf(leaf)
 	if !ok {
-		s.log.Warnf(`RRQ %q -> 404 (unknown filename; known: netboot.xyz.efi, netboot.xyz-snponly.efi, netboot.xyz-arm64.efi, netboot.xyz.kpxe)`, filename)
+		s.log.Warnf(`RRQ %q -> 404 (unknown filename; known: ipxe.efi, snponly.efi, ipxe-arm64.efi, undionly.kpxe — plus legacy netboot.xyz-* aliases)`, filename)
 		return fmt.Errorf("file not found: %s", filename)
 	}
 
@@ -223,15 +223,20 @@ func (s *Server) readHandler(filename string, rf io.ReaderFrom) error {
 }
 
 // kindForLeaf maps a requested filename to an embedded asset.
+// v0.6.0+: vanilla upstream iPXE filenames are canonical (ipxe.efi,
+// snponly.efi, ...). Legacy netboot.xyz-* names are accepted as
+// aliases so any client firmware config that hard-coded the old
+// names continues to work — but they now resolve to vanilla iPXE
+// bytes, not netboot.xyz's.
 func kindForLeaf(leaf string) (assets.IPXEKind, bool) {
 	switch leaf {
-	case "netboot.xyz.efi", "ipxe.efi":
+	case "ipxe.efi", "netboot.xyz.efi":
 		return assets.IPXEEFIx64, true
-	case "netboot.xyz-snponly.efi", "ipxe-snponly.efi":
+	case "snponly.efi", "netboot.xyz-snponly.efi", "ipxe-snponly.efi":
 		return assets.IPXESNPOnly, true
-	case "netboot.xyz-arm64.efi", "ipxe-arm64.efi":
+	case "ipxe-arm64.efi", "netboot.xyz-arm64.efi":
 		return assets.IPXEARM64, true
-	case "netboot.xyz.kpxe", "undionly.kpxe", "ipxe.kpxe":
+	case "undionly.kpxe", "netboot.xyz.kpxe", "ipxe.kpxe":
 		return assets.IPXELegacyBIOS, true
 	}
 	return 0, false

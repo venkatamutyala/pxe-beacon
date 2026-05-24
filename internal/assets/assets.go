@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 )
 
-//go:embed ipxe/netboot.xyz.efi ipxe/netboot.xyz-snponly.efi ipxe/netboot.xyz-arm64.efi ipxe/netboot.xyz.kpxe
+//go:embed ipxe/ipxe.efi ipxe/snponly.efi ipxe/ipxe-arm64.efi ipxe/undionly.kpxe
 //go:embed scripts/boot.ipxe
 //go:embed scripts/autoexec/menu.ipxe
 //go:embed scripts/autoexec/ubuntu-22.04.ipxe
@@ -66,15 +66,18 @@ func resolveOverride(rel string) ([]byte, bool) {
 	return b, true
 }
 
-// IPXEKind identifies which embedded iPXE/netboot.xyz binary to serve.
+// IPXEKind identifies which embedded iPXE binary to serve.
+// v0.6.0+: vanilla upstream iPXE (was netboot.xyz pre-v0.6).
 type IPXEKind int
 
 const (
-	// IPXEEFIx64 is the standard UEFI x86_64 iPXE EFI executable.
+	// IPXEEFIx64 is the standard UEFI x86_64 iPXE EFI executable
+	// (full driver — includes native NIC drivers, larger binary).
 	IPXEEFIx64 IPXEKind = iota
-	// IPXESNPOnly is the SNP-only build (uses firmware's SNP NIC stack).
+	// IPXESNPOnly is the SNP-only build (uses firmware's SNP NIC
+	// stack — most compatible, smaller binary).
 	IPXESNPOnly
-	// IPXEARM64 is the UEFI aarch64 iPXE EFI executable.
+	// IPXEARM64 is the UEFI aarch64 iPXE EFI executable (SNP-only).
 	IPXEARM64
 	// IPXELegacyBIOS is the legacy BIOS undionly.kpxe build.
 	IPXELegacyBIOS
@@ -83,13 +86,13 @@ const (
 func (k IPXEKind) String() string {
 	switch k {
 	case IPXEEFIx64:
-		return "netboot.xyz.efi"
+		return "ipxe.efi"
 	case IPXESNPOnly:
-		return "netboot.xyz-snponly.efi"
+		return "snponly.efi"
 	case IPXEARM64:
-		return "netboot.xyz-arm64.efi"
+		return "ipxe-arm64.efi"
 	case IPXELegacyBIOS:
-		return "netboot.xyz.kpxe"
+		return "undionly.kpxe"
 	}
 	return "unknown"
 }

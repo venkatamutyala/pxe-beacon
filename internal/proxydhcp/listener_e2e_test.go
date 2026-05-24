@@ -100,15 +100,15 @@ func TestListener_EndToEnd_SyntheticDISCOVER(t *testing.T) {
 	if got := reply.ServerIdentifier().String(); got != "127.0.0.1" {
 		t.Errorf("server-identifier = %s, want 127.0.0.1", got)
 	}
-	if reply.BootFileName != "netboot.xyz-snponly.efi" {
-		t.Errorf("bootfile = %q, want netboot.xyz-snponly.efi", reply.BootFileName)
+	if reply.BootFileName != "snponly.efi" {
+		t.Errorf("bootfile = %q, want snponly.efi", reply.BootFileName)
 	}
 
 	logStr := logBuf.String()
 	if !strings.Contains(logStr, "stage=firmware-TFTP") {
 		t.Errorf("expected stage=firmware-TFTP in narrated log:\n%s", logStr)
 	}
-	if !strings.Contains(logStr, "decision: serve netboot.xyz-snponly.efi via TFTP") {
+	if !strings.Contains(logStr, "decision: serve snponly.efi via TFTP") {
 		t.Errorf("expected decision line:\n%s", logStr)
 	}
 }
