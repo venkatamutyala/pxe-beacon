@@ -40,7 +40,7 @@ type RenderContext struct {
 // autoexec templates. (Custom and unknown targets aren't.)
 func IsBuiltIn(target string) bool {
 	switch target {
-	case "menu", "ubuntu-22.04", "ubuntu-24.04", "debian-12":
+	case "menu", "ubuntu-22.04", "ubuntu-24.04", "debian-12", "debian-13":
 		return true
 	}
 	return false

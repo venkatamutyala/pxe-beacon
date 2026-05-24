@@ -18,7 +18,7 @@ func sampleCtx() RenderContext {
 }
 
 func TestIsBuiltIn(t *testing.T) {
-	for _, want := range []string{"menu", "ubuntu-22.04", "ubuntu-24.04", "debian-12"} {
+	for _, want := range []string{"menu", "ubuntu-22.04", "ubuntu-24.04", "debian-12", "debian-13"} {
 		if !IsBuiltIn(want) {
 			t.Errorf("IsBuiltIn(%q) = false, want true", want)
 		}
@@ -76,6 +76,23 @@ func TestRenderAutoexec_Ubuntu2404(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "24.04") {
 		t.Errorf("ubuntu-24.04 autoexec missing version:\n%s", out)
+	}
+}
+
+func TestRenderAutoexec_Debian13(t *testing.T) {
+	out, err := RenderAutoexec("debian-13", sampleCtx())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, want := range []string{
+		"#!ipxe",
+		"trixie",
+		"58-47-ca-70-c7-c9",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("debian-13 autoexec missing %q:\n%s", want, s)
+		}
 	}
 }
 

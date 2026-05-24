@@ -1,0 +1,25 @@
+#!ipxe
+# pxe-beacon: target=debian-13 (Trixie).
+#
+# *** v0.2.x STATUS: d-i boots, but goes INTERACTIVE. ***
+# Verified via Trixie initrd inspection (May 2026): mainline d-i
+# in Trixie has zero cloud-init / NoCloud support — 1739 files in
+# the netboot initrd, none mention cloud-init. Trixie behaves
+# identically to bookworm: needs preseed.cfg for unattended.
+# v0.3 will add preseed.cfg support; this template will gain
+# auto=true url=... at that point. Until then: interactive.
+echo pxe-beacon: {{.Name}} ({{.MAC}}) -> Debian 13 (d-i interactive — see PROGRESS.md)
+
+set base http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}
+# Trixie mirror layout matches bookworm (current/images/netboot/...);
+# deb.debian.org redirects to a healthy mirror automatically.
+set mirror https://deb.debian.org/debian/dists/trixie/main/installer-amd64/current/images/netboot/debian-installer/amd64
+
+imgfree
+kernel --name linux ${mirror}/linux \
+  ip=dhcp \
+  cloud-config-url=/dev/null \
+  ds=nocloud-net\;s=${base}/ \
+  ---
+initrd --name initrd.gz ${mirror}/initrd.gz
+boot || shell

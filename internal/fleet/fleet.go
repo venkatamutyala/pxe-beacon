@@ -31,6 +31,7 @@ var ValidBootTargets = map[string]bool{
 	"ubuntu-22.04": true,
 	"ubuntu-24.04": true,
 	"debian-12":    true,
+	"debian-13":    true,
 	"custom":       true,
 }
 
@@ -213,7 +214,7 @@ func validateProfile(p Profile, ctx string) error {
 		if _, err := os.Stat(p.IPXEScript); err != nil {
 			return fmt.Errorf("%s: ipxe_script %s: %w", ctx, p.IPXEScript, err)
 		}
-	case "ubuntu-22.04", "ubuntu-24.04", "debian-12":
+	case "ubuntu-22.04", "ubuntu-24.04", "debian-12", "debian-13":
 		// Autoinstall targets need a cloud-init user-data file.
 		// Refusing to start is intentional — see PROGRESS.md / the
 		// roadmap: we don't ship a default credential.

@@ -15,6 +15,7 @@ import (
 //go:embed scripts/autoexec/ubuntu-22.04.ipxe
 //go:embed scripts/autoexec/ubuntu-24.04.ipxe
 //go:embed scripts/autoexec/debian-12.ipxe
+//go:embed scripts/autoexec/debian-13.ipxe
 var fsys embed.FS
 
 // FS returns the embedded filesystem rooted at the package's
