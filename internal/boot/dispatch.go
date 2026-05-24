@@ -67,7 +67,7 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("# the boot story unfold.")
 	w("")
 	w("echo ============================================================")
-	w("echo  pxe-beacon dispatch (v0.6.10) — back out BOOTIF + DEBCONF_DEBUG from v0.6.9")
+	w("echo  pxe-beacon dispatch (v0.6.11) — use explicit ${net0/...} for kernel ip= cmdline")
 	w("echo ============================================================")
 	w("echo")
 	w("echo [stage 0/5] iPXE settings BEFORE dhcp")
@@ -245,7 +245,11 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	// the widened netmask.
 	ipArg := "ip=dhcp"
 	if ctx.ClientNetmask != "" {
-		ipArg = fmt.Sprintf("ip=${ip}::${gateway}:%s:::none", ctx.ClientNetmask)
+		// v0.6.11: use explicit ${net0/...} form, not the unprefixed
+		// ${ip} and ${gateway} aliases. The unprefixed forms aren't
+		// reliably set on all iPXE builds — same family of issue
+		// as ${mac:hexhyp} from v0.5.2.
+		ipArg = fmt.Sprintf("ip=${net0/ip}::${net0/gateway}:%s:::none", ctx.ClientNetmask)
 	}
 
 	w("")
