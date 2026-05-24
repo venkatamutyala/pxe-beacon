@@ -263,23 +263,28 @@ var macHyphen = regexp.MustCompile(`^[0-9a-fA-F]{2}(-[0-9a-fA-F]{2}){5}$`)
 func (s *Server) extractMAC(w http.ResponseWriter, r *http.Request) string {
 	raw := r.PathValue("mac")
 	if raw == "" {
-		http.Error(w, "missing mac in URL", http.StatusBadRequest)
+		s.writeError(w, r, http.StatusBadRequest, ErrCodeMACMissing, "missing mac in URL", nil)
 		return ""
 	}
 	// Accept hyphen-MAC (the canonical URL form) or colon-MAC.
 	canon, err := fleet.CanonicalMAC(raw)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("invalid mac %q: %v", raw, err), http.StatusBadRequest)
+		s.writeError(w, r, http.StatusBadRequest, ErrCodeMACInvalid,
+			fmt.Sprintf("invalid mac %q: %v", raw, err), map[string]any{"input": raw})
 		return ""
 	}
 	return canon
 }
 
 // fleetReady returns true when Fleet + Tracker are both wired up. When
-// not, the handler should 404 and tell the user to pass -config.
-func (s *Server) fleetReady(w http.ResponseWriter) bool {
+// not, it writes a content-negotiated error and returns false.
+//
+// v0.9.0: 503 (not 404) — "service up, feature not configured" — and
+// content-negotiated so an API client gets the structured envelope.
+func (s *Server) fleetReady(w http.ResponseWriter, r *http.Request) bool {
 	if s.opts.Fleet == nil || s.opts.FleetStatus == nil {
-		http.Error(w, "fleet mode not enabled (start pxe-beacon with -config <fleet.yaml>)", http.StatusNotFound)
+		s.writeError(w, r, http.StatusServiceUnavailable, ErrCodeFleetNotLoaded,
+			"fleet mode not enabled (start pxe-beacon with -config <fleet.yaml>)", nil)
 		return false
 	}
 	return true
@@ -289,7 +294,7 @@ func (s *Server) fleetReady(w http.ResponseWriter) bool {
 // chains iPXE here; we look up the MAC's boot target and render the
 // matching template (or the operator's custom script).
 func (s *Server) handleAutoexec(w http.ResponseWriter, r *http.Request) {
-	if !s.fleetReady(w) {
+	if !s.fleetReady(w, r) {
 		return
 	}
 	mac := s.extractMAC(w, r)
@@ -338,7 +343,7 @@ func (s *Server) handleAutoexec(w http.ResponseWriter, r *http.Request) {
 // {Name, MAC, AdvertisedIP, HTTPPort} so operators can keep a
 // phone_home URL working without hardcoding their server IP.
 func (s *Server) handleUserData(w http.ResponseWriter, r *http.Request) {
-	if !s.fleetReady(w) {
+	if !s.fleetReady(w, r) {
 		return
 	}
 	mac := s.extractMAC(w, r)
@@ -411,7 +416,7 @@ func (s *Server) handleUserData(w http.ResponseWriter, r *http.Request) {
 // The interactive stub is technically a valid (empty) preseed; d-i
 // fetches it, finds no answers, and prompts normally.
 func (s *Server) handlePreseed(w http.ResponseWriter, r *http.Request) {
-	if !s.fleetReady(w) {
+	if !s.fleetReady(w, r) {
 		return
 	}
 	mac := s.extractMAC(w, r)
@@ -516,7 +521,7 @@ func (s *Server) handlePreseed(w http.ResponseWriter, r *http.Request) {
 // distro-specific BaseOS URL (Rocky vs Alma) is selected per fleet
 // entry's boot target.
 func (s *Server) handleKickstart(w http.ResponseWriter, r *http.Request) {
-	if !s.fleetReady(w) {
+	if !s.fleetReady(w, r) {
 		return
 	}
 	mac := s.extractMAC(w, r)
@@ -631,7 +636,7 @@ d-i preseed/late_command string \
 // instance-id at minimum; we also set local-hostname so the installed
 // system gets the operator's chosen name.
 func (s *Server) handleMetaData(w http.ResponseWriter, r *http.Request) {
-	if !s.fleetReady(w) {
+	if !s.fleetReady(w, r) {
 		return
 	}
 	mac := s.extractMAC(w, r)
@@ -656,7 +661,7 @@ func (s *Server) handleMetaData(w http.ResponseWriter, r *http.Request) {
 // rescue is preserved so a stale phone_home from a previous install
 // can't silently clear an operator's freshly-queued rescue session).
 func (s *Server) handleInstallerDone(w http.ResponseWriter, r *http.Request) {
-	if !s.fleetReady(w) {
+	if !s.fleetReady(w, r) {
 		return
 	}
 	mac := s.extractMAC(w, r)
@@ -841,7 +846,7 @@ func (s *Server) handleAsset(w http.ResponseWriter, r *http.Request) {
 // buffer-then-flush so an encode failure becomes a 500, not a
 // truncated 200.
 func (s *Server) handleStatusJSON(w http.ResponseWriter, r *http.Request) {
-	if !s.fleetReady(w) {
+	if !s.fleetReady(w, r) {
 		return
 	}
 	machines := s.opts.Fleet.ListMachines()
@@ -883,7 +888,7 @@ func (s *Server) handleStatusJSON(w http.ResponseWriter, r *http.Request) {
 // handleStatusHTML renders the same data as a plain auto-refreshing
 // HTML page.
 func (s *Server) handleStatusHTML(w http.ResponseWriter, r *http.Request) {
-	if !s.fleetReady(w) {
+	if !s.fleetReady(w, r) {
 		return
 	}
 	snap := s.opts.FleetStatus.Snapshot()

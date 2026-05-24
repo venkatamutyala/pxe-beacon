@@ -1,7 +1,9 @@
 // Package pending tracks per-machine pending boot intent for pxe-beacon.
 //
 // v0.8.0 K8s-style API: operators set the desired action via PUT to
-//   /api/v1/machines/{mac}/intent with body {"action": "install"|"rescue"|null}.
+//
+//	/api/v1/machines/{mac}/intent with body {"action": "install"|"rescue"|null}.
+//
 // Internally that maps to Install / Rescue / Cancel on Store.
 //
 // proxyDHCP consults IsPending(mac) before responding: no pending

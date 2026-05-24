@@ -393,8 +393,11 @@ func TestHTTP_StatusHTML(t *testing.T) {
 	}
 }
 
-func TestHTTP_FleetRoutes_404WithoutConfig(t *testing.T) {
-	// startTestServer doesn't pass Fleet → fleet routes should 404.
+func TestHTTP_FleetRoutes_503WithoutConfig(t *testing.T) {
+	// startTestServer doesn't pass Fleet → fleet routes should 503.
+	// v0.9.0: changed from 404 to 503 — "service up, feature not
+	// configured" is the correct semantic; 404 wrongly implied the
+	// URL was bad.
 	addr := startTestServer(t)
 	for _, p := range []string{
 		"/autoinstall/58-47-ca-70-c7-c9/autoexec.ipxe",
@@ -408,8 +411,8 @@ func TestHTTP_FleetRoutes_404WithoutConfig(t *testing.T) {
 			t.Errorf("%s: %v", p, err)
 			continue
 		}
-		if resp.StatusCode != http.StatusNotFound {
-			t.Errorf("%s status = %d, want 404 (no -config)", p, resp.StatusCode)
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Errorf("%s status = %d, want 503 (no -config)", p, resp.StatusCode)
 		}
 		resp.Body.Close()
 	}

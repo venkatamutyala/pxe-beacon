@@ -7,3 +7,6 @@ PLAN.md
 *.out
 debug.txt
 commands.txt
+
+# core dumps
+core

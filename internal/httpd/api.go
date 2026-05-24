@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/venkatamutyala/pxe-beacon/internal/fleet"
@@ -73,16 +75,17 @@ type intentPUTBody struct {
 // these, not on the prose `message`. New codes are additive; existing
 // codes don't change meaning across releases. v0.9.0+.
 const (
-	ErrCodeFleetNotLoaded      = "fleet_not_loaded"
+	ErrCodeFleetNotLoaded       = "fleet_not_loaded"
 	ErrCodePendingNotConfigured = "pending_not_configured"
-	ErrCodeMACMissing          = "mac_missing"
-	ErrCodeMACInvalid          = "mac_invalid"
-	ErrCodeMACNotInFleet       = "mac_not_in_fleet"
-	ErrCodeBodyInvalid         = "body_invalid"
-	ErrCodeActionMissing       = "action_missing"
-	ErrCodeActionInvalid       = "action_invalid"
-	ErrCodeRescueUnimplemented = "rescue_unimplemented"
-	ErrCodePendingFailed       = "pending_failed"
+	ErrCodeMACMissing           = "mac_missing"
+	ErrCodeMACInvalid           = "mac_invalid"
+	ErrCodeMACNotInFleet        = "mac_not_in_fleet"
+	ErrCodeBodyInvalid          = "body_invalid"
+	ErrCodeActionMissing        = "action_missing"
+	ErrCodeActionInvalid        = "action_invalid"
+	ErrCodeRescueUnimplemented  = "rescue_unimplemented"
+	ErrCodePendingFailed        = "pending_failed"
+	ErrCodePagingInvalid        = "paging_invalid"
 )
 
 // apiErrorView is the v0.9.0+ structured error response. `code` is the
@@ -236,20 +239,84 @@ func (s *Server) handleAPIMachine(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.buildMachineView(mac, p))
 }
 
-// handleAPIList — GET /api/v1/machines
+// defaultPageLimit caps an unbounded GET /api/v1/machines so a huge
+// fleet never returns an unbounded body. Clients page past it with
+// ?offset=. v0.9.0+.
+const defaultPageLimit = 500
+
+// handleAPIList — GET /api/v1/machines?limit=&offset=
+//
+// v0.9.0: paginated. `limit` defaults to 500 (also the max); `offset`
+// defaults to 0. Response includes `total` (full fleet size before
+// paging) plus `limit`/`offset` echoes so clients can iterate. The
+// underlying ListMachines() is stably sorted, so offset paging is
+// deterministic.
 func (s *Server) handleAPIList(w http.ResponseWriter, r *http.Request) {
 	if !s.apiReady(w) {
 		return
 	}
+
+	limit, offset, ok := parsePaging(w, r)
+	if !ok {
+		return
+	}
+
 	machines := s.opts.Fleet.ListMachines()
-	out := make([]machineAPIView, 0, len(machines))
-	for _, m := range machines {
+	total := len(machines)
+
+	// Clamp the window to the slice bounds.
+	lo := offset
+	if lo > total {
+		lo = total
+	}
+	hi := lo + limit
+	if hi > total {
+		hi = total
+	}
+	page := machines[lo:hi]
+
+	out := make([]machineAPIView, 0, len(page))
+	for _, m := range page {
 		out = append(out, s.buildMachineView(m.MAC, m.Profile))
 	}
 	writeJSON(w, map[string]any{
 		"pending_ttl_s": pendingTTLSeconds(s.opts.Pending),
+		"total":         total,
+		"limit":         limit,
+		"offset":        offset,
 		"machines":      out,
 	})
+}
+
+// parsePaging reads + validates ?limit= and ?offset=. On bad input it
+// writes a structured 400 and returns ok=false. Empty params take the
+// defaults (limit=defaultPageLimit, offset=0).
+func parsePaging(w http.ResponseWriter, r *http.Request) (limit, offset int, ok bool) {
+	limit = defaultPageLimit
+	offset = 0
+	q := r.URL.Query()
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			writeAPIError(w, http.StatusBadRequest, ErrCodePagingInvalid,
+				"limit must be a non-negative integer", map[string]any{"got": v})
+			return 0, 0, false
+		}
+		if n == 0 || n > defaultPageLimit {
+			n = defaultPageLimit
+		}
+		limit = n
+	}
+	if v := q.Get("offset"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			writeAPIError(w, http.StatusBadRequest, ErrCodePagingInvalid,
+				"offset must be a non-negative integer", map[string]any{"got": v})
+			return 0, 0, false
+		}
+		offset = n
+	}
+	return limit, offset, true
 }
 
 func (s *Server) buildDesired(canon string) desiredView {
@@ -304,7 +371,8 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = enc.Encode(v)
 }
 
-// writeAPIError emits a structured v0.9.0+ error envelope. `status`
+// writeAPIError emits a structured v0.9.0+ JSON error envelope. Used
+// directly by the /api/v1/* handlers, which are always JSON. `status`
 // is the HTTP status code; `code` is the stable machine-readable
 // identifier; `msg` is human prose; `details` is optional context.
 //
@@ -319,6 +387,33 @@ func writeAPIError(w http.ResponseWriter, status int, code, msg string, details 
 		Message: msg,
 		Details: details,
 	})
+}
+
+// wantsJSON reports whether the caller wants a JSON error body. True
+// for any /api/ path, or when the Accept header asks for JSON. The
+// /autoinstall/* and /assets/* wire endpoints (cloud-init, d-i,
+// Anaconda) don't send Accept: application/json, so they keep getting
+// plain text — which is what those consumers parse. v0.9.0+.
+func wantsJSON(r *http.Request) bool {
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		return true
+	}
+	return strings.Contains(r.Header.Get("Accept"), "application/json")
+}
+
+// writeError is the v0.9.0 unified, content-negotiating error path. It
+// emits the structured JSON envelope to JSON clients (wantsJSON) and
+// plain text otherwise. Replaces scattered http.Error calls so the
+// machine-facing surface has one error mechanism.
+//
+// (The /admin HTML flow keeps redirectFlash until v0.9 item #3 folds
+// admin mutations into /api/v1/*.)
+func (s *Server) writeError(w http.ResponseWriter, r *http.Request, status int, code, msg string, details map[string]any) {
+	if wantsJSON(r) {
+		writeAPIError(w, status, code, msg, details)
+		return
+	}
+	http.Error(w, msg, status)
 }
 
 func pendingTTLSeconds(s *pending.Store) int {
@@ -428,4 +523,3 @@ func (s *Server) logIntent(r *http.Request, mac, name, action string, status int
 	s.log.Infof("audit event=set-intent action=%s target_mac=%s target_name=%q result=%d from=%s",
 		action, mac, name, status, r.RemoteAddr)
 }
-

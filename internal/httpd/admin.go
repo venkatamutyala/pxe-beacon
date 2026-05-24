@@ -94,7 +94,7 @@ func (s *Server) csrfGuard(h http.HandlerFunc) http.HandlerFunc {
 
 // handleAdminIndex renders /admin.
 func (s *Server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
-	if !s.fleetReady(w) {
+	if !s.fleetReady(w, r) {
 		return
 	}
 	type viewModel struct {
@@ -132,7 +132,7 @@ func (s *Server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 // handleAdminFleetSave handles POST /admin/fleet — add or update a
 // machine entry. Writes fleet.yaml on success.
 func (s *Server) handleAdminFleetSave(w http.ResponseWriter, r *http.Request) {
-	if !s.fleetReady(w) {
+	if !s.fleetReady(w, r) {
 		return
 	}
 	mac := strings.TrimSpace(r.FormValue("mac"))
@@ -187,7 +187,7 @@ func (s *Server) handleAdminFleetSave(w http.ResponseWriter, r *http.Request) {
 
 // handleAdminFleetDelete handles POST /admin/fleet/delete.
 func (s *Server) handleAdminFleetDelete(w http.ResponseWriter, r *http.Request) {
-	if !s.fleetReady(w) {
+	if !s.fleetReady(w, r) {
 		return
 	}
 	mac := strings.TrimSpace(r.FormValue("mac"))
@@ -324,7 +324,7 @@ func (s *Server) handleAdminTemplateReset(w http.ResponseWriter, r *http.Request
 // handleAdminReload handles POST /admin/reload — in-process equivalent
 // of SIGHUP. Re-reads fleet.yaml from disk.
 func (s *Server) handleAdminReload(w http.ResponseWriter, r *http.Request) {
-	if !s.fleetReady(w) {
+	if !s.fleetReady(w, r) {
 		return
 	}
 	if err := s.opts.Fleet.Reload(); err != nil {

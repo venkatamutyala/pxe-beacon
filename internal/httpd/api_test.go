@@ -315,6 +315,9 @@ func TestAPI_List(t *testing.T) {
 	}
 	var resp struct {
 		PendingTTLs int              `json:"pending_ttl_s"`
+		Total       int              `json:"total"`
+		Limit       int              `json:"limit"`
+		Offset      int              `json:"offset"`
 		Machines    []machineAPIView `json:"machines"`
 	}
 	decode(t, w, &resp)
@@ -326,6 +329,79 @@ func TestAPI_List(t *testing.T) {
 	}
 	if resp.PendingTTLs != int((15 * time.Minute).Seconds()) {
 		t.Errorf("pending_ttl_s wrong: got %d", resp.PendingTTLs)
+	}
+	if resp.Total != 1 {
+		t.Errorf("total = %d, want 1", resp.Total)
+	}
+	if resp.Limit != defaultPageLimit {
+		t.Errorf("limit = %d, want default %d", resp.Limit, defaultPageLimit)
+	}
+}
+
+func TestAPI_List_Pagination(t *testing.T) {
+	// Build a server with several machines so paging is observable.
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "fleet.yaml")
+	if err := os.WriteFile(yamlPath, []byte(`
+machines:
+  - {mac: "aa:bb:cc:dd:ee:01", name: m1, boot: debian-12}
+  - {mac: "aa:bb:cc:dd:ee:02", name: m2, boot: debian-12}
+  - {mac: "aa:bb:cc:dd:ee:03", name: m3, boot: debian-12}
+  - {mac: "aa:bb:cc:dd:ee:04", name: m4, boot: debian-12}
+  - {mac: "aa:bb:cc:dd:ee:05", name: m5, boot: debian-12}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	log := narrlog.New("test", narrlog.LevelDebug, nil)
+	fl, err := fleet.Load(yamlPath, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(Options{
+		Listen: "127.0.0.1:0", AdvertisedIP: "127.0.0.1", HTTPPort: 8080,
+		Logger: log, Fleet: fl, FleetStatus: fleet.NewTracker(fl, time.Minute),
+		Pending: pending.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// limit=2 offset=2 → middle page of 2.
+	w := doLoopback(srv, "GET", "/api/v1/machines?limit=2&offset=2", "")
+	if w.Code != 200 {
+		t.Fatalf("status %d", w.Code)
+	}
+	var resp struct {
+		Total, Limit, Offset int
+		Machines             []machineAPIView
+	}
+	decode(t, w, &resp)
+	if resp.Total != 5 {
+		t.Errorf("total = %d, want 5", resp.Total)
+	}
+	if resp.Limit != 2 || resp.Offset != 2 {
+		t.Errorf("limit/offset = %d/%d, want 2/2", resp.Limit, resp.Offset)
+	}
+	if len(resp.Machines) != 2 {
+		t.Fatalf("page size = %d, want 2", len(resp.Machines))
+	}
+
+	// offset past the end → empty page, no error.
+	w = doLoopback(srv, "GET", "/api/v1/machines?offset=99", "")
+	decode(t, w, &struct{ Machines []machineAPIView }{})
+	if w.Code != 200 {
+		t.Errorf("offset-past-end: status %d, want 200", w.Code)
+	}
+
+	// bad limit → 400 paging_invalid.
+	w = doLoopback(srv, "GET", "/api/v1/machines?limit=-3", "")
+	if w.Code != 400 {
+		t.Fatalf("bad limit: want 400, got %d", w.Code)
+	}
+	var ev apiErrorView
+	decode(t, w, &ev)
+	if ev.Code != ErrCodePagingInvalid {
+		t.Errorf("code = %q, want %q", ev.Code, ErrCodePagingInvalid)
 	}
 }
 

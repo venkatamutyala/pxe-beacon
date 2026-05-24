@@ -322,6 +322,40 @@ Codes shipped in v0.9.0:
 | `action_invalid` | 400 | `action` value isn't `install`, `rescue`, or `null` |
 | `rescue_unimplemented` | 501 | rescue boot target not yet wired (tracked for v0.8.2) |
 | `pending_failed` | 500 | internal error in the pending store |
+| `paging_invalid` | 400 | `?limit=` / `?offset=` not a non-negative integer |
+
+#### Pagination (v0.9.0+)
+
+`GET /api/v1/machines` is paginated. `?limit=` defaults to (and caps at)
+500; `?offset=` defaults to 0. The response echoes `total` (full fleet
+size), `limit`, and `offset` so clients can iterate:
+
+```bash
+curl 'http://127.0.0.1:8080/api/v1/machines?limit=50&offset=100'
+# {"total":237,"limit":50,"offset":100,"pending_ttl_s":900,"machines":[...]}
+```
+
+The underlying list is stably sorted (by name, then MAC), so offset
+paging is deterministic across calls.
+
+#### API versioning policy (v0.9.0+)
+
+The API is versioned in the path (`/api/v1/`). Compatibility contract:
+
+- **Additive changes** (new endpoints, new optional fields, new error
+  `code` values) ship within `v1` without a version bump. Clients must
+  ignore unknown fields.
+- **Breaking changes** ship under a new path prefix (`/api/v2/`).
+- When `v2` ships, `v1` routes carry RFC 8594 headers — `Deprecation:
+  true` and `Sunset: <RFC 1123 date>` — and remain functional for a
+  **minimum of two minor releases** (if `v2` lands in `N.0`, `v1` is
+  removed no earlier than `N+2.0`).
+- `code` identifiers in the error envelope never change meaning; only
+  the human-readable `message` may be reworded.
+
+Deprecated-but-still-served endpoints (like `/status.json`, superseded
+by `GET /api/v1/machines`) carry the same `Deprecation` + `Link:
+rel="successor-version"` headers.
 
 **Cloud-init phone_home:** the example user-data files include a
 `phone_home` block that tells cloud-init to POST to pxe-beacon when
