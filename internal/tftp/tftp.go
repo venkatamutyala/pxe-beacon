@@ -111,6 +111,24 @@ func (s *Server) readHandler(filename string, rf io.ReaderFrom) error {
 		logPath = fmt.Sprintf("%s (leaf=%s)", filename, leaf)
 	}
 
+	// v0.5.6: TFTP probe — the dispatch script may RRQ filenames like
+	// `probe/net0/58-47-ca-70-c7-c9` or `probe/ip/10.69.7.218`. Log
+	// the requested filename and serve an empty body. This is the
+	// known-good fallback when iPXE's TCP/HTTP doesn't work on a
+	// given firmware (e.g. some AMI SNP drivers).
+	normalized := strings.ReplaceAll(filename, "\\", "/")
+	if strings.HasPrefix(normalized, "probe/") {
+		s.log.Infof("iPXE-state via TFTP from client: %s", strings.TrimPrefix(normalized, "probe/"))
+		// Serve a 1-byte file. Some iPXE builds error on zero-byte
+		// transfers; a single newline is the safest minimum.
+		body := []byte("\n")
+		if outSizer, ok := rf.(interface{ SetSize(int64) }); ok {
+			outSizer.SetSize(int64(len(body)))
+		}
+		_, _ = rf.ReadFrom(bytes.NewReader(body))
+		return nil
+	}
+
 	// autoexec.ipxe — operator override hook. In v0.5.0+ this is the
 	// per-MAC dispatch script (see internal/boot/dispatch.go). In
 	// -legacy-redirector mode it's the v0.4.x HTTP redirector stub.

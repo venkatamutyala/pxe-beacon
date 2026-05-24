@@ -195,6 +195,11 @@ func (s *Server) routes() {
 	// expand to (mac, net0/mac, net1/mac, ip, gateway, dns) — much
 	// more reliable than reading the screen during a fast boot.
 	s.mux.HandleFunc("GET /debug/iPXE-state", s.handleDebugIPXEState)
+	// v0.5.6: path-based probe route. Some iPXE builds parse `&` in
+	// URLs strangely; path segments are always safe. Each chain
+	// emits one piece of info: /debug/probe/<key>/<value>.
+	s.mux.HandleFunc("GET /debug/probe/{key}/{value...}", s.handleDebugProbe)
+	s.mux.HandleFunc("GET /debug/probe/{key}", s.handleDebugProbe)
 
 	// Admin routes — loopback-only, CSRF-guarded on POST. Wildcard
 	// {name...} captures slash-containing template paths like
@@ -528,6 +533,23 @@ func (s *Server) handleInstallerDone(w http.ResponseWriter, r *http.Request) {
 // handleAsset serves a file from DataDir/<target>/<file>. The target
 // + file names are validated to reject path traversal (cache.AssetPath
 // does the check). Used by the Ubuntu autoexec templates to fetch
+// handleDebugProbe is the simpler path-based variant of the iPXE
+// phone-home. Lets the dispatch script call multiple chains with
+// per-key URLs that contain no `&` characters at all — robust to
+// any URL-parsing quirks in iPXE's chain command.
+func (s *Server) handleDebugProbe(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("key")
+	value := r.PathValue("value")
+	if value == "" {
+		s.log.Infof("iPXE-state via HTTP from %s: %s", r.RemoteAddr, key)
+	} else {
+		s.log.Infof("iPXE-state via HTTP from %s: %s=%q", r.RemoteAddr, key, value)
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("#!ipxe\n"))
+}
+
 // handleDebugIPXEState logs what iPXE's settings actually expand to.
 // The dispatch script chains here before the iseq dispatch, passing
 // mac variants + dhcp results as query params. Critical for
