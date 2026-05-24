@@ -65,7 +65,7 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("# directly. No HTTP chain dependency.")
 	w("")
 	w("echo ==============================================")
-	w("echo pxe-beacon dispatch (v0.5.13)")
+	w("echo pxe-beacon dispatch (v0.6.2)")
 	w("echo   net0/mac       = ${net0/mac}")
 	w("echo   net0/mac:hxhyp = ${net0/mac:hexhyp}")
 	w("echo ==============================================")
@@ -186,17 +186,33 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	fmt.Fprintf(buf, ":%s\n", label)
 	fmt.Fprintf(buf, "echo pxe-beacon: %s (%s) -> %s\n", name, m.MAC, m.Profile.Boot)
 
-	// v0.5.3: control flow uses explicit goto labels for every error
-	// branch. The previous form `cmd || echo X && sleep N && reboot`
-	// was a precedence trap — iPXE/bash evaluate it as
-	// `(cmd || echo) && sleep && reboot`, so `sleep + reboot` fires
-	// after `cmd` SUCCEEDS too, putting the box in a reboot loop that
-	// never reaches the kernel.
+	// v0.6.2: 10-second interactive boot menu. Default = fleet target
+	// (auto-selected for unattended boots). Operator at the console
+	// can press a key to override:
+	//   1 — fleet target (default, this is the auto-selected option)
+	//   2 — netboot.xyz menu (pick a different OS interactively)
+	//   3 — iPXE shell (debug)
+	fmt.Fprintf(buf, "menu pxe-beacon: %s (%s)\n", name, m.MAC)
+	fmt.Fprintf(buf, "item --gap fleet config: boot=%s\n", m.Profile.Boot)
+	fmt.Fprintf(buf, "item --default --key 1 %s_boot   Boot fleet target (default: %s) — auto in 10s\n",
+		label, m.Profile.Boot)
+	fmt.Fprintf(buf, "item --key 2 target_default                            netboot.xyz menu (manual OS picker)\n")
+	fmt.Fprintf(buf, "item --key 3 %s_shell                                  iPXE shell (debug)\n", label)
+	fmt.Fprintf(buf, "choose --timeout 10000 --default %s_boot %s_menu_choice ||\n", label, label)
+	fmt.Fprintf(buf, "goto %s_boot\n", label)
+	fmt.Fprintf(buf, "goto ${%s_menu_choice}\n", label)
+	w("")
+	fmt.Fprintf(buf, ":%s_shell\n", label)
+	w("echo pxe-beacon: dropping to iPXE shell. Type 'exit' to return to autoboot.")
+	w("shell")
+	fmt.Fprintf(buf, "goto %s\n", label)
+	w("")
+	fmt.Fprintf(buf, ":%s_boot\n", label)
 
-	// v0.5.13: dhcp + netmask widening are now done ONCE at the top
-	// of the script. Doing them again here would overwrite the
-	// widened netmask with the DHCP-supplied /24, breaking the
-	// cross-subnet fix.
+	// v0.5.13: dhcp + netmask widening are done ONCE at the top of
+	// the script. Doing them again here would overwrite the widened
+	// netmask with the DHCP-supplied /24, breaking the cross-subnet
+	// fix.
 	w("imgfree")
 
 	switch m.Profile.Boot {
