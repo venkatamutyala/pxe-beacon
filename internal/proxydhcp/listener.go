@@ -78,13 +78,29 @@ func (l *Listener) broadcastReply() bool {
 
 // NoteServed implements OfferTracker — called by the TFTP/HTTP
 // servers when a client successfully fetches an asset.
+//
+// The TFTP and HTTP servers don't natively know the client's MAC
+// (TFTP RRQ doesn't carry it, HTTP requests come from an IP not a
+// MAC), so they pass opaque tags like "tftp-anon" or "http-anon".
+// Treat *any* such signal as "the server is actively serving
+// something" and clear all pending hints — the failure-path hint
+// exists to flag a stuck server, not to track per-client progress.
+// (When a real per-MAC name is passed in the future, we honor it
+// as a hint-clear for that specific MAC.)
 func (l *Listener) NoteServed(mac string) {
 	if mac == "" {
 		return
 	}
 	l.pendingMu.Lock()
-	delete(l.pending, mac)
-	l.pendingMu.Unlock()
+	defer l.pendingMu.Unlock()
+	if _, exact := l.pending[mac]; exact {
+		delete(l.pending, mac)
+		return
+	}
+	// Opaque tag — clear everything; we know the server is active.
+	for k := range l.pending {
+		delete(l.pending, k)
+	}
 }
 
 // Serve binds 67 + 4011 and runs until ctx is cancelled.

@@ -1,0 +1,8 @@
+#!ipxe
+# pxe-beacon: target=menu — defer to netboot.xyz iPXE's embedded chain
+# script (which goes to https://boot.netboot.xyz/menu.ipxe directly).
+# This file is served so that iPXE's autoexec.ipxe probe succeeds
+# cleanly instead of 404ing (cosmetic improvement); we then `exit` so
+# the embed.ipxe in netboot.xyz iPXE takes over normally.
+echo pxe-beacon: machine {{.Name}} ({{.MAC}}) -> netboot.xyz menu
+exit

@@ -11,6 +11,10 @@ import (
 
 //go:embed ipxe/netboot.xyz.efi ipxe/netboot.xyz-snponly.efi ipxe/netboot.xyz-arm64.efi ipxe/netboot.xyz.kpxe
 //go:embed scripts/boot.ipxe
+//go:embed scripts/autoexec/menu.ipxe
+//go:embed scripts/autoexec/ubuntu-22.04.ipxe
+//go:embed scripts/autoexec/ubuntu-24.04.ipxe
+//go:embed scripts/autoexec/debian-12.ipxe
 var fsys embed.FS
 
 // FS returns the embedded filesystem rooted at the package's
@@ -66,6 +70,21 @@ func ReadScript() ([]byte, error) {
 	b, err := fs.ReadFile(fsys, "scripts/boot.ipxe")
 	if err != nil {
 		return nil, fmt.Errorf("read embedded boot.ipxe: %w", err)
+	}
+	return b, nil
+}
+
+// ReadAutoexec returns the embedded autoexec.ipxe template for a
+// given boot target (e.g. "menu", "ubuntu-22.04"). Unknown targets
+// return an error; callers should validate via fleet.ValidBootTargets
+// first.
+func ReadAutoexec(target string) ([]byte, error) {
+	if target == "" {
+		return nil, fmt.Errorf("empty target")
+	}
+	b, err := fs.ReadFile(fsys, "scripts/autoexec/"+target+".ipxe")
+	if err != nil {
+		return nil, fmt.Errorf("read embedded autoexec/%s.ipxe: %w", target, err)
 	}
 	return b, nil
 }

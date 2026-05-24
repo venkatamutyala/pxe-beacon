@@ -11,4 +11,5 @@ require (
 	github.com/u-root/uio v0.0.0-20230220225925-ffce2a382923 // indirect
 	golang.org/x/net v0.43.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

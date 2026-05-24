@@ -1,0 +1,16 @@
+#!ipxe
+# pxe-beacon: target=ubuntu-24.04 unattended autoinstall.
+# Mirror layout same as 22.04 — only the version path changes.
+echo pxe-beacon: {{.Name}} ({{.MAC}}) -> ubuntu-24.04 autoinstall
+
+set base http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}
+
+imgfree
+kernel --name vmlinuz http://boot.netboot.xyz/os/ubuntu/24.04/casper/vmlinuz \
+  initrd=initrd.gz \
+  ip=dhcp ipv6.disable=1 \
+  cloud-config-url=/dev/null \
+  autoinstall ds=nocloud-net\;s=${base}/ \
+  --- quiet
+initrd --name initrd.gz http://boot.netboot.xyz/os/ubuntu/24.04/casper/initrd
+boot || shell

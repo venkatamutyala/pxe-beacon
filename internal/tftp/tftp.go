@@ -103,7 +103,15 @@ func (s *Server) readHandler(filename string, rf io.ReaderFrom) error {
 
 	kind, ok := kindForLeaf(leaf)
 	if !ok {
-		s.log.Warnf(`RRQ %q -> 404 (unknown filename; known: netboot.xyz.efi, netboot.xyz-snponly.efi, netboot.xyz-arm64.efi, netboot.xyz.kpxe)`, filename)
+		// Many iPXE builds probe for autoexec.ipxe at startup; a 404
+		// is the expected/benign outcome when no operator override
+		// exists. Log at info level with a benign tag rather than
+		// scaring readers with a warn.
+		if leaf == "autoexec.ipxe" {
+			s.log.Infof(`(benign: RRQ %q -> 404; no operator override configured, iPXE will use its embedded chain)`, filename)
+		} else {
+			s.log.Warnf(`RRQ %q -> 404 (unknown filename; known: netboot.xyz.efi, netboot.xyz-snponly.efi, netboot.xyz-arm64.efi, netboot.xyz.kpxe)`, filename)
+		}
 		return fmt.Errorf("file not found: %s", filename)
 	}
 
@@ -126,7 +134,17 @@ func (s *Server) readHandler(filename string, rf io.ReaderFrom) error {
 	// pin/tftp's returned `n` includes blocksize/OACK overhead and
 	// can exceed len(data); trust the error return for success.
 	if _, err := rf.ReadFrom(bytes.NewReader(data)); err != nil {
-		s.log.Errorf("RRQ %q -> transfer error: %v", filename, err)
+		// iPXE issues a tsize-negotiation probe RRQ, cancels it
+		// (ERROR code 8 "User Aborted"), then re-RRQs without tsize
+		// and the second attempt succeeds. The library surfaces the
+		// abort as a transfer error — it's not actually a failure,
+		// just a benign retry pattern. Detect and demote to debug.
+		es := err.Error()
+		if strings.Contains(es, "User aborted") || strings.Contains(es, "code=8") {
+			s.log.Debugf("RRQ %q -> client aborted to retry with different options (benign): %v", filename, err)
+		} else {
+			s.log.Errorf("RRQ %q -> transfer error: %v", filename, err)
+		}
 		return err
 	}
 	s.log.Infof(`TFTP RRQ %q -> served %s (%d bytes) ok`, filename, kind, len(data))

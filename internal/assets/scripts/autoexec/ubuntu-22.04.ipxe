@@ -1,0 +1,33 @@
+#!ipxe
+# pxe-beacon: target=ubuntu-22.04 unattended autoinstall via Subiquity
+# + cloud-init. The kernel + initrd are pulled from Ubuntu's release
+# mirror at the URLs below — these are the casper/ files extracted
+# from the live-server ISO. If the mirror URLs change upstream, edit
+# this template; everything else stays the same.
+#
+# Vars rendered by Go text/template at request time:
+#   {{.Name}}          machine display name (from fleet.yaml)
+#   {{.MAC}}           canonical colon-MAC (lowercase)
+#   {{.MACHyp}}        hyphen-MAC for URL paths
+#   {{.AdvertisedIP}}  pxe-beacon server IP
+#   {{.HTTPPort}}      pxe-beacon HTTP port
+echo pxe-beacon: {{.Name}} ({{.MAC}}) -> ubuntu-22.04 autoinstall
+
+set base http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}
+set src http://releases.ubuntu.com/22.04/ubuntu-22.04.5-live-server-amd64.iso
+
+# Subiquity netboot: kernel and initrd live inside the ISO at /casper/.
+# iPXE's HTTP can't extract from an ISO, so the convention is to
+# chain through netboot.xyz which hosts the extracted artifacts —
+# OR provide them yourself via -data dir (future v0.2.x).
+# For v0.2.0 we chain through netboot.xyz then override the kernel
+# args with our autoinstall directive via imgargs.
+imgfree
+kernel --name vmlinuz http://boot.netboot.xyz/os/ubuntu/22.04/casper/vmlinuz \
+  initrd=initrd.gz \
+  ip=dhcp ipv6.disable=1 \
+  cloud-config-url=/dev/null \
+  autoinstall ds=nocloud-net\;s=${base}/ \
+  --- quiet
+initrd --name initrd.gz http://boot.netboot.xyz/os/ubuntu/22.04/casper/initrd
+boot || shell

@@ -1,0 +1,24 @@
+#!ipxe
+# pxe-beacon: target=debian-12 unattended install. Debian publishes
+# flat-file netboot kernel + initrd at deb.debian.org — no ISO
+# extraction needed. We boot the d-i (debian-installer) kernel and
+# pass auto + preseed URL pointing at our cloud-init user-data.
+#
+# Note: Debian 12 (bookworm) primarily uses preseed, but the
+# debian-installer in 12+ accepts a cloud-init datasource as well.
+# We point at user-data — Debian's cloud-init aware installer reads
+# the same NoCloud format Ubuntu uses.
+echo pxe-beacon: {{.Name}} ({{.MAC}}) -> debian-12 autoinstall
+
+set base http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}
+set mirror http://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/legacy-images/netboot/debian-installer/amd64
+
+imgfree
+kernel --name linux ${mirror}/linux \
+  auto=true priority=critical \
+  ip=dhcp \
+  cloud-config-url=/dev/null \
+  ds=nocloud-net\;s=${base}/ \
+  ---
+initrd --name initrd.gz ${mirror}/initrd.gz
+boot || shell
