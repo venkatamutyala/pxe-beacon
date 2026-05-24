@@ -275,10 +275,22 @@ Terraform / Ansible / React Query map cleanly to it. Unknown MACs
 netboot.xyz fallback, so booting a random box doesn't require any
 prior queueing.
 
-**Note:** rescue is a placeholder for now — the API accepts `action:
-"rescue"` and queues it, but there is no rescue boot target wired
-into the dispatch script yet (lands in v0.8.1). Power-cycle / BMC
-support also v0.8.1.
+**Note:** rescue is not yet wired — `PUT /intent {"action":"rescue"}`
+returns **501 Not Implemented** as of v0.8.1, and does not mutate the
+pending store. The real SystemRescue boot target lands in v0.8.2.
+
+**Already-installed guard (v0.8.1+):** once a machine reaches
+`installer-done` via cloud-init phone-home, pxe-beacon will no longer
+OFFER it a PXE boot. To re-install, `PUT /intent {"action":"install"}`
+to re-arm — this is the explicit force flag.
+
+**Restart caveat:** the already-installed guard is in-memory only. A
+`pxe-beacon` restart wipes the tracker and re-arms ALL non-pending
+machines. Power down test machines or set `boot=menu` in `fleet.yaml`
+before restarting in production. Persistent tracker is a v0.9 task.
+
+**No sticky install mode:** each install cycle requires a fresh `PUT
+/intent`. `-pending-ttl=0` works for indefinite-pending semantics.
 
 **Cloud-init phone_home:** the example user-data files include a
 `phone_home` block that tells cloud-init to POST to pxe-beacon when

@@ -47,7 +47,19 @@ type Config struct {
 	// MACs (no fleet entry) bypass this check entirely; they keep the
 	// netboot.xyz fallback behavior so "I just want to PXE-boot a
 	// random box" still works. v0.7.1+ (was Armed in v0.7.0).
+	//
+	// v0.8.1: consulted ONLY in the firmware stage. iPXE-stage
+	// REQUESTs (userclass=iPXE) bypass — otherwise we strand iPXE
+	// mid-chainload if intent is cancelled mid-install.
 	Pending func(mac string) bool
+	// LastEvent, when non-nil, returns the most recent fleet-tracker
+	// event for the MAC (or "" if never seen). BuildOffer uses it to
+	// implement the already-installed guard: a fleet-known MAC whose
+	// LastEvent is EventInstallerDone AND has no pending intent is
+	// silently skipped, so a stray BIOS-order rotation can't trigger
+	// an accidental reinstall. Operator's explicit PUT /intent re-arms
+	// (pending becomes non-nil; guard does not fire). v0.8.1+.
+	LastEvent func(mac string) fleet.Event
 }
 
 // defaultUserClass returns the configured iPXE user class, defaulting
@@ -81,6 +93,11 @@ const (
 	// pending deploy/rescue action. The client falls through to
 	// local-disk boot. v0.7.1+ (was SkipDisarmed in v0.7.0).
 	SkipNoPendingAction
+	// SkipAlreadyDeployed indicates a known fleet member whose last
+	// recorded event is EventInstallerDone, with no pending intent.
+	// Protects a running production box from accidental reinstall
+	// if its BIOS boot order ever rotates to PXE. v0.8.1+.
+	SkipAlreadyDeployed
 )
 
 // Decision describes everything BuildOffer concluded about a request.
@@ -154,18 +171,6 @@ func BuildOffer(req *dhcpv4.DHCPv4, cfg Config) (*dhcpv4.DHCPv4, Decision, error
 		machineKnown = p.Name != ""
 	}
 
-	// v0.7.1: pending-action check. Fleet members must have a
-	// pending action (POST /api/v1/machines/{mac}/deploy or /rescue)
-	// to receive an OFFER. Unknown MACs bypass this — they get the
-	// netboot.xyz fallback as before.
-	if machineKnown && cfg.Pending != nil && !cfg.Pending(d.ClientMAC) {
-		d.Stage = StageSkip
-		d.Skip = SkipNoPendingAction
-		d.SkipReason = fmt.Sprintf("%s (%s) has no pending action — POST /api/v1/machines/%s/deploy or /rescue to queue one",
-			d.MachineName, d.ClientMAC, d.ClientMAC)
-		return nil, d, ErrSkip
-	}
-
 	// We respond to DISCOVER (initial broadcast on 67) and REQUEST
 	// (unicast on 4011 used by some firmware after picking an OFFER).
 	mt := req.MessageType()
@@ -223,6 +228,13 @@ func BuildOffer(req *dhcpv4.DHCPv4, cfg Config) (*dhcpv4.DHCPv4, Decision, error
 		// iPXE-stage: hand it the chain script over HTTP. Arch is
 		// largely irrelevant here because iPXE itself does the HTTP
 		// fetch — it just needs the URL.
+		//
+		// v0.8.1: iPXE-stage REQUESTs are NOT subject to the pending
+		// or already-installed guards. If we don't OFFER here we
+		// strand iPXE mid-chainload — a previously-OK install that
+		// the operator just cancelled would brick. The firmware-stage
+		// guards below already prevented the box from entering iPXE
+		// in the first place; if iPXE is alive, let it finish.
 		scriptURL := fmt.Sprintf("http://%s:%d%s",
 			cfg.AdvertisedIP.String(), cfg.HTTPPort, cfg.IPXEScriptPath)
 		reply.BootFileName = scriptURL
@@ -234,6 +246,45 @@ func BuildOffer(req *dhcpv4.DHCPv4, cfg Config) (*dhcpv4.DHCPv4, Decision, error
 		d.NextServer = cfg.AdvertisedIP.String()
 		d.SelectedArch = selectArch(d.Archs)
 		return reply, d, nil
+	}
+
+	// Firmware stage: per-fleet-member gating.
+	//
+	// v0.8.1: Two gates, in this order, before any arch-specific work:
+	//   (a) pending-action check — operator must have queued an
+	//       install or rescue intent via PUT /api/v1/machines/{mac}/intent.
+	//   (b) already-installed guard — if the last observed event is
+	//       installer-done AND there's no pending intent (or pending
+	//       is install — operator's explicit re-arm wins), skip OFFER.
+	//
+	// Unknown MACs (machineKnown == false) bypass both — they get
+	// the netboot.xyz fallback as in <= v0.6.x. Both gates apply only
+	// to firmware-stage; iPXE-stage was already handled above.
+	if machineKnown {
+		hasPending := cfg.Pending != nil && cfg.Pending(d.ClientMAC)
+		if !hasPending {
+			// No pending intent. Two reasons we'd skip the OFFER;
+			// prefer the MORE SPECIFIC one for clearer operator log
+			// messages: already-installed > generic no-pending.
+			//
+			// Both reasons require the operator's explicit PUT
+			// /intent to re-arm — pending of ANY kind (install or
+			// rescue) overrides both guards.
+			if cfg.LastEvent != nil && cfg.LastEvent(d.ClientMAC) == fleet.EventInstallerDone {
+				d.Stage = StageSkip
+				d.Skip = SkipAlreadyDeployed
+				d.SkipReason = fmt.Sprintf("%s (%s) already reached installer-done — PUT /api/v1/machines/%s/intent {\"action\":\"install\"} to re-arm",
+					d.MachineName, d.ClientMAC, d.ClientMAC)
+				return nil, d, ErrSkip
+			}
+			if cfg.Pending != nil {
+				d.Stage = StageSkip
+				d.Skip = SkipNoPendingAction
+				d.SkipReason = fmt.Sprintf("%s (%s) has no pending action — PUT /api/v1/machines/%s/intent {\"action\":\"install\"} to queue one",
+					d.MachineName, d.ClientMAC, d.ClientMAC)
+				return nil, d, ErrSkip
+			}
+		}
 	}
 
 	// Firmware stage: arch dictates transport + which binary.

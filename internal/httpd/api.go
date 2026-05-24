@@ -152,16 +152,20 @@ func (s *Server) handleAPISetIntent(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusInternalServerError, "install: "+err.Error())
 			return
 		}
-		s.log.Infof("PUT %s -> 200, intent=install for %s (%s)", r.URL.Path, p.Name, mac)
+		s.logIntent(r, mac, p.Name, "install", 200)
 	case "rescue":
-		if _, err := s.opts.Pending.Rescue(mac); err != nil {
-			writeAPIError(w, http.StatusInternalServerError, "rescue: "+err.Error())
-			return
-		}
-		s.log.Infof("PUT %s -> 200, intent=rescue for %s (%s)", r.URL.Path, p.Name, mac)
+		// v0.8.1: rescue boot target not yet wired into the dispatch
+		// script (tracked for v0.8.2). Return 501 and do NOT touch
+		// the pending store — accepting rescue today would queue an
+		// intent that silently boots the configured install OS
+		// instead, which is worse than refusing the call.
+		s.logIntent(r, mac, p.Name, "rescue", 501)
+		writeAPIError(w, http.StatusNotImplemented,
+			"rescue boot target not yet wired (tracked for v0.8.2); intent NOT queued")
+		return
 	case "":
 		s.opts.Pending.Cancel(mac)
-		s.log.Infof("PUT %s -> 200, intent cleared for %s (%s)", r.URL.Path, p.Name, mac)
+		s.logIntent(r, mac, p.Name, "cancel", 200)
 	default:
 		writeAPIError(w, http.StatusBadRequest,
 			`action must be "install", "rescue", or null; got `+action)
@@ -273,5 +277,18 @@ func pendingTTLSeconds(s *pending.Store) int {
 		return 0
 	}
 	return int(s.TTL() / time.Second)
+}
+
+// logIntent writes a structured audit-log line for every PUT /intent
+// mutation. v0.8.1: format is key=value pairs (not free text) so v0.9
+// can layer real user identity from bootstrap tokens without changing
+// the schema, and ops tooling can grep by `target_mac=` or `action=`
+// reliably.
+//
+// from= is always 127.0.0.1 today (loopbackOnly) but kept for v0.9
+// when token-bearer auth lifts the loopback constraint.
+func (s *Server) logIntent(r *http.Request, mac, name, action string, status int) {
+	s.log.Infof("audit event=set-intent action=%s target_mac=%s target_name=%q result=%d from=%s",
+		action, mac, name, status, r.RemoteAddr)
 }
 

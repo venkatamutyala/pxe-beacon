@@ -135,6 +135,10 @@ func main() {
 		IPXEScriptPath: "/boot.ipxe",
 		Fleet:          fl,
 		Pending:        pendSt.IsPending,
+		// v0.8.1: already-installed guard. proxyDHCP consults the
+		// Tracker via this callback so a previously-installed box
+		// without fresh pending intent stops receiving OFFERs.
+		LastEvent: statusTracker.LastEvent,
 	}
 
 	lst, err := proxydhcp.New(proxydhcp.ServerOptions{
@@ -214,7 +218,7 @@ func main() {
 
 	// SIGHUP triggers a fleet config reload (no-op for Empty fleet).
 	if *flagConfig != "" {
-		go watchSIGHUP(ctx, fl, log)
+		go watchSIGHUP(ctx, fl, pendSt, log)
 	}
 
 	errc := make(chan error, 3)
@@ -249,7 +253,11 @@ func main() {
 
 // watchSIGHUP reloads the fleet config when SIGHUP arrives. Cancelled
 // by ctx so it dies with the rest of the program.
-func watchSIGHUP(ctx context.Context, fl *fleet.Fleet, log *narrlog.Logger) {
+//
+// v0.8.1: after a successful reload, the pending store also drops
+// any entries for MACs no longer in the fleet, so removing a machine
+// from fleet.yaml cleanly cancels its queued intent.
+func watchSIGHUP(ctx context.Context, fl *fleet.Fleet, pendSt *pending.Store, log *narrlog.Logger) {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGHUP)
 	defer signal.Stop(ch)
@@ -261,6 +269,17 @@ func watchSIGHUP(ctx context.Context, fl *fleet.Fleet, log *narrlog.Logger) {
 			log.Infof("SIGHUP received, reloading fleet config")
 			if err := fl.Reload(); err != nil {
 				log.Errorf("fleet reload failed: %v (keeping previous config)", err)
+				continue
+			}
+			if pendSt != nil {
+				machines := fl.Machines()
+				removed, dropped := pendSt.RetainOnly(func(mac string) bool {
+					_, ok := machines[mac]
+					return ok
+				})
+				if removed > 0 {
+					log.Infof("reload: dropped %d pending intent(s) for removed MAC(s): %v", removed, dropped)
+				}
 			}
 		}
 	}

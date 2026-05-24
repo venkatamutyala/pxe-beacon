@@ -96,21 +96,18 @@ func TestAPI_SetIntent_Install(t *testing.T) {
 	}
 }
 
-func TestAPI_SetIntent_Rescue(t *testing.T) {
+func TestAPI_SetIntent_Rescue_Returns501(t *testing.T) {
+	// v0.8.1: rescue boot target not yet wired (v0.8.2). API must
+	// 501 and NOT touch the pending store.
 	srv, pSt, _ := newAPIServer(t)
 	mac := "58:47:ca:70:c7:c9"
 
 	w := doLoopback(srv, "PUT", "/api/v1/machines/"+mac+"/intent", `{"action":"rescue"}`)
-	if w.Code != 200 {
-		t.Fatalf("PUT rescue: status %d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("PUT rescue: want 501, got %d body=%s", w.Code, w.Body.String())
 	}
-	var view intentView
-	decode(t, w, &view)
-	if view.Desired.Action != "rescue" {
-		t.Fatalf("want desired.action=rescue, got %+v", view)
-	}
-	if !pSt.IsPending(mac) {
-		t.Fatal("Store should be pending")
+	if pSt.IsPending(mac) {
+		t.Fatal("rescue 501 must NOT queue an intent")
 	}
 }
 
@@ -269,7 +266,7 @@ func TestAPI_NonLoopback_403(t *testing.T) {
 	}
 }
 
-func TestAPI_InstallerDone_AutoCancels(t *testing.T) {
+func TestAPI_InstallerDone_CancelsPendingInstall(t *testing.T) {
 	srv, pSt, _ := newAPIServer(t)
 	mac := "58:47:ca:70:c7:c9"
 	if _, err := pSt.Install(mac); err != nil {
@@ -286,6 +283,32 @@ func TestAPI_InstallerDone_AutoCancels(t *testing.T) {
 		t.Fatalf("done: status %d body=%s", w.Code, w.Body.String())
 	}
 	if pSt.IsPending(mac) {
-		t.Fatal("phone_home should have cancelled")
+		t.Fatal("phone_home should have cancelled the pending install")
+	}
+}
+
+func TestAPI_InstallerDone_PreservesPendingRescue(t *testing.T) {
+	// v0.8.1: a stale cloud-init phone_home from a previous install
+	// must NOT cancel a freshly-queued rescue session.
+	srv, pSt, _ := newAPIServer(t)
+	mac := "58:47:ca:70:c7:c9"
+	// Bypass the API's rescue 501 by going directly to the Store —
+	// this models the v0.8.2 state where rescue is real, and
+	// validates the v0.8.1 handler-side selective-cancel logic.
+	if _, err := pSt.Rescue(mac); err != nil {
+		t.Fatal(err)
+	}
+	if !pSt.IsPending(mac) {
+		t.Fatal("precondition: rescue should be pending")
+	}
+	req := httptest.NewRequest("POST", "/autoinstall/58-47-ca-70-c7-c9/done", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("done: status %d body=%s", w.Code, w.Body.String())
+	}
+	if !pSt.IsPending(mac) {
+		t.Fatal("phone_home from a stale install must NOT cancel a fresh rescue")
 	}
 }

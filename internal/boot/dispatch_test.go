@@ -203,6 +203,39 @@ machines:
 	}
 }
 
+func TestDispatch_ARM64_HardRefuse(t *testing.T) {
+	// v0.8.1: dispatch script emits a two-line iseq allowlist at the
+	// top, before the per-MAC dispatch. ${buildarch} not in {i386,
+	// x86_64} hits a reboot block.
+	out := RenderDispatch(nil, dispatchCtx())
+	s := string(out)
+
+	// The allowlist lines must use the documented one-iseq-per-line
+	// pattern (chained `||`/`&&` doesn't work in iPXE — v0.5.14 bug).
+	for _, want := range []string{
+		"iseq ${buildarch} i386   && goto arch_ok",
+		"iseq ${buildarch} x86_64 && goto arch_ok",
+		"UNSUPPORTED ARCH",
+		":arch_ok",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("dispatch missing %q:\n%s", want, s)
+		}
+	}
+
+	// The arch check must come BEFORE the stage-0 settings dump (the
+	// settings dump references x86-only paths that would confuse an
+	// operator on an unsupported board).
+	archIdx := strings.Index(s, ":arch_ok")
+	stageIdx := strings.Index(s, "[stage 0/5]")
+	if archIdx < 0 || stageIdx < 0 {
+		t.Fatal("missing required markers")
+	}
+	if archIdx > stageIdx {
+		t.Error("arch check must precede [stage 0/5] settings dump")
+	}
+}
+
 func TestDispatch_LabelOf_Sanitizes(t *testing.T) {
 	// v0.5.15: labels are [a-zA-Z0-9_] only. Hyphens, dots, slashes,
 	// spaces, etc. all become '_'. (iPXE's goto silently no-ops on

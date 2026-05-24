@@ -5,6 +5,7 @@ import (
 	"context"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +14,30 @@ import (
 
 	"github.com/venkatamutyala/pxe-beacon/internal/narrlog"
 )
+
+// syncBuffer is a sync.Mutex-guarded bytes.Buffer for use as a log
+// sink in tests where the listener goroutine writes concurrently with
+// the test goroutine reading. Plain bytes.Buffer has no internal lock;
+// -race flags the concurrent access even when the test's logical
+// sequence happens to work.
+//
+// v0.8.1 fix for the long-standing TestListener_EndToEnd_* races.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 // TestListener_EndToEnd_SyntheticDISCOVER fires a real DISCOVER at the
 // listener over UDP loopback and asserts the OFFER bytes contain the
@@ -23,7 +48,7 @@ import (
 func TestListener_EndToEnd_SyntheticDISCOVER(t *testing.T) {
 	false_ := false
 
-	logBuf := &bytes.Buffer{}
+	logBuf := &syncBuffer{}
 	log := narrlog.New("test", narrlog.LevelDebug, logBuf)
 
 	l, err := New(ServerOptions{
@@ -119,7 +144,7 @@ func TestListener_EndToEnd_SyntheticDISCOVER(t *testing.T) {
 // warns about.
 func TestListener_EndToEnd_iPXEUserClassServesScript(t *testing.T) {
 	false_ := false
-	logBuf := &bytes.Buffer{}
+	logBuf := &syncBuffer{}
 	log := narrlog.New("test", narrlog.LevelInfo, logBuf)
 
 	l, _ := New(ServerOptions{

@@ -331,6 +331,17 @@ func (s *Server) handleAdminReload(w http.ResponseWriter, r *http.Request) {
 		redirectFlash(w, r, "err", fmt.Sprintf("reload failed: %v", err))
 		return
 	}
+	// v0.8.1: drop pending entries for MACs removed from fleet.yaml.
+	if s.opts.Pending != nil {
+		machines := s.opts.Fleet.Machines()
+		removed, dropped := s.opts.Pending.RetainOnly(func(mac string) bool {
+			_, ok := machines[mac]
+			return ok
+		})
+		if removed > 0 {
+			s.log.Infof("admin reload: dropped %d pending intent(s) for removed MAC(s): %v", removed, dropped)
+		}
+	}
 	s.log.Infof("admin: fleet reloaded")
 	redirectFlash(w, r, "ok", "fleet reloaded from disk")
 }

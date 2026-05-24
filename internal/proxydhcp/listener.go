@@ -58,6 +58,12 @@ type Listener struct {
 	srv67   *server4.Server
 	srv4011 *server4.Server
 
+	// wg joins the two Serve goroutines on shutdown. v0.8.1 fix for
+	// the pre-existing TestListener_EndToEnd_* races: without joining,
+	// Serve returned while the upstream dhcp library was still inside
+	// its read loop, racing with the test's cancel().
+	wg sync.WaitGroup
+
 	pendingMu sync.Mutex
 	pending   map[string]time.Time // MAC -> OFFER sent at
 }
@@ -138,8 +144,15 @@ func (l *Listener) Serve(ctx context.Context) error {
 		p67, p4011, l.opts.Interface, l.opts.Config.AdvertisedIP)
 
 	errc := make(chan error, 2)
-	go func() { errc <- l.srv67.Serve() }()
-	go func() { errc <- l.srv4011.Serve() }()
+	l.wg.Add(2)
+	go func() {
+		defer l.wg.Done()
+		errc <- l.srv67.Serve()
+	}()
+	go func() {
+		defer l.wg.Done()
+		errc <- l.srv4011.Serve()
+	}()
 
 	select {
 	case <-ctx.Done():
@@ -149,8 +162,13 @@ func (l *Listener) Serve(ctx context.Context) error {
 			l.log.Errorf("proxyDHCP listener exited: %v", err)
 		}
 	}
+	// v0.8.1: Close THEN Wait. Close unblocks the Serve goroutines
+	// out of their read loops; Wait ensures they've fully exited
+	// before Serve returns (and therefore before the test reads any
+	// shared state under -race).
 	_ = l.srv67.Close()
 	_ = l.srv4011.Close()
+	l.wg.Wait()
 	return nil
 }
 

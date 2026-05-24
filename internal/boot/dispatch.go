@@ -61,13 +61,28 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 
 	w("#!ipxe")
 	w("# pxe-beacon dispatch — generated per request from fleet.yaml.")
-	w("# v0.6.5: verbose, screen-debuggable. Every stage transition is")
-	w("# echoed with a ===== header, settings are dumped, and 2-second")
-	w("# sleeps separate sections so a human at the console can see")
-	w("# the boot story unfold.")
+	w("")
+	// v0.8.1: ARM64 hard-refuse. Two-line iseq allowlist (NOT chained
+	// `||`/`&&` — those don't have bash precedence in iPXE; see the
+	// v0.5.14 comment further down in this file for the prior bug).
+	// ${buildarch} is i386 on legacy-BIOS x86 (iPXE is 32-bit even on
+	// x86_64 BIOS) and x86_64 on UEFI x86_64. Anything else (arm64,
+	// arm, etc.) hits the refuse block and reboots after a notice —
+	// our dispatch arms hardcode amd64 mirrors and the box would
+	// silently brick if we proceeded.
+	w("# v0.8.1: arch allowlist (proper multi-arch is a future release).")
+	w("iseq ${buildarch} i386   && goto arch_ok")
+	w("iseq ${buildarch} x86_64 && goto arch_ok")
+	w("echo")
+	w("echo ===== UNSUPPORTED ARCH =====")
+	w("echo pxe-beacon v0.8.1 supports amd64/x86_64 only; got buildarch=${buildarch}")
+	w("echo multi-arch tracked for a future release; rebooting in 30s")
+	w("sleep 30")
+	w("reboot")
+	w(":arch_ok")
 	w("")
 	w("echo ============================================================")
-	w("echo  pxe-beacon dispatch (v0.6.16) — cmdline matches netboot.xyz (no BOOTIF/ip/console)")
+	w("echo  pxe-beacon dispatch (v0.8.1) — already-installed guard, ARM64 refuse, listener races fixed")
 	w("echo ============================================================")
 	w("echo")
 	w("echo [stage 0/5] iPXE settings BEFORE dhcp")

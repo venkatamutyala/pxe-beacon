@@ -645,8 +645,9 @@ func (s *Server) handleMetaData(w http.ResponseWriter, r *http.Request) {
 
 // handleInstallerDone is the cloud-init phone_home callback. Once
 // hit, the machine transitions to "installer-done" in the status
-// tracker and (v0.7.1+) the pending action is cancelled so a
-// subsequent reboot falls through to local disk.
+// tracker, and a pending INSTALL action is cancelled (v0.8.1+:
+// rescue is preserved so a stale phone_home from a previous install
+// can't silently clear an operator's freshly-queued rescue session).
 func (s *Server) handleInstallerDone(w http.ResponseWriter, r *http.Request) {
 	if !s.fleetReady(w) {
 		return
@@ -657,8 +658,15 @@ func (s *Server) handleInstallerDone(w http.ResponseWriter, r *http.Request) {
 	}
 	p := s.opts.Fleet.Lookup(mac)
 	s.opts.FleetStatus.Note(mac, fleet.EventInstallerDone)
+	// v0.8.1: only cancel install. Rescue intents are operator-driven
+	// and orthogonal to install completion; preserving them prevents
+	// a stale cloud-init phone_home (from a previous install) from
+	// silently clearing a fresh rescue queued by the operator.
 	if s.opts.Pending != nil {
-		s.opts.Pending.Cancel(mac)
+		action, _, _, ok := s.opts.Pending.Status(mac)
+		if ok && action == pending.ActionInstall {
+			s.opts.Pending.Cancel(mac)
+		}
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	body := "ok\n"

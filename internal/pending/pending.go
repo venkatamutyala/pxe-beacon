@@ -133,3 +133,29 @@ func (s *Store) Status(mac string) (action Action, requestedAt, expiresAt time.T
 func (s *Store) TTL() time.Duration {
 	return s.ttl
 }
+
+// RetainOnly drops every entry whose canonical MAC is not accepted by
+// `known`. Returns the number of entries removed and a slice of the
+// dropped MACs for logging.
+//
+// Called from the SIGHUP fleet-reload path and POST /admin/reload, so
+// removing a machine from fleet.yaml also clears any pending intent
+// for it. Tracker entries are NOT pruned symmetrically — install
+// history is observational/audit and survives config edits (per
+// v0.8.1 DC-engineer review).
+//
+// Critical-section discipline: collect-while-locked, log-after-unlock
+// (per Systems-engineer review). The caller's logger must not block
+// the OFFER hot path that consults IsPending under the same mu.
+func (s *Store) RetainOnly(known func(mac string) bool) (removed int, dropped []string) {
+	s.mu.Lock()
+	for mac := range s.entries {
+		if !known(mac) {
+			dropped = append(dropped, mac)
+			delete(s.entries, mac)
+			removed++
+		}
+	}
+	s.mu.Unlock()
+	return removed, dropped
+}

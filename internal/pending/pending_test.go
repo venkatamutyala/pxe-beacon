@@ -160,6 +160,44 @@ func TestMACCanonicalization(t *testing.T) {
 	}
 }
 
+func TestRetainOnly_DropsUnknown(t *testing.T) {
+	// v0.8.1: SIGHUP fleet reload prunes pending entries whose MACs
+	// were removed from fleet.yaml.
+	s := New(15 * time.Minute)
+	keepMAC := "58:47:ca:70:c7:c9"
+	dropMAC := "aa:bb:cc:dd:ee:01"
+	if _, err := s.Install(keepMAC); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Install(dropMAC); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, dropped := s.RetainOnly(func(mac string) bool {
+		return mac == keepMAC
+	})
+	if removed != 1 {
+		t.Errorf("removed = %d, want 1", removed)
+	}
+	if len(dropped) != 1 || dropped[0] != dropMAC {
+		t.Errorf("dropped = %v, want [%q]", dropped, dropMAC)
+	}
+	if !s.IsPending(keepMAC) {
+		t.Error("keep MAC must still be pending")
+	}
+	if s.IsPending(dropMAC) {
+		t.Error("drop MAC must no longer be pending")
+	}
+}
+
+func TestRetainOnly_Empty(t *testing.T) {
+	s := New(15 * time.Minute)
+	removed, dropped := s.RetainOnly(func(mac string) bool { return true })
+	if removed != 0 || len(dropped) != 0 {
+		t.Errorf("empty store RetainOnly: removed=%d dropped=%v", removed, dropped)
+	}
+}
+
 func TestConcurrency(t *testing.T) {
 	// Run with -race.
 	s := New(15 * time.Minute)

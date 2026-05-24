@@ -109,6 +109,25 @@ func (t *Tracker) Note(mac string, ev Event) {
 	s.LastSeen = t.now()
 }
 
+// LastEvent returns the most recent event recorded for mac, or ""
+// if the MAC has never been observed. Used by proxyDHCP's
+// already-installed guard. v0.8.1+.
+//
+// Returns Event by value (not the *Status pointer) to avoid leaking
+// the locked struct. Takes RLock; intended for the OFFER hot path.
+func (t *Tracker) LastEvent(mac string) Event {
+	canon, err := CanonicalMAC(mac)
+	if err != nil {
+		return ""
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if s, ok := t.machines[canon]; ok {
+		return s.State
+	}
+	return ""
+}
+
 // Snapshot returns the current status for every machine — both
 // configured ones (even if never seen) and observed-but-unconfigured
 // MACs. Sorted by name (configured first), then MAC. Stalled flag

@@ -513,6 +513,108 @@ func TestBuildOffer_NilPendingCallback_AllowsAll(t *testing.T) {
 	}
 }
 
+// v0.8.1 tests: iPXE-stage bypass, already-installed guard.
+
+func TestBuildOffer_iPXEStage_BypassesPendingCheck(t *testing.T) {
+	// PXE-expert blocker: an iPXE-stage REQUEST (userclass=iPXE) must
+	// always get the script URL OFFER, even when Pending returns false.
+	// Otherwise we strand iPXE mid-chainload if intent is cancelled
+	// right after install kickoff.
+	req := newDiscover(t, "58:47:ca:70:c7:c9", iana.EFI_X86_64, "PXEClient", "iPXE")
+	cfg := defaultCfg()
+	cfg.Fleet = fleetCfg(t)
+	cfg.Pending = func(mac string) bool { return false } // explicit "no pending"
+
+	reply, dec, err := BuildOffer(req, cfg)
+	if err != nil {
+		t.Fatalf("iPXE-stage with no pending: want OFFER, got err=%v", err)
+	}
+	if reply == nil {
+		t.Fatal("iPXE-stage must get script URL OFFER regardless of pending state")
+	}
+	if dec.Stage != StageIPXEScript {
+		t.Errorf("Decision.Stage = %q, want %q", dec.Stage, StageIPXEScript)
+	}
+}
+
+func TestBuildOffer_iPXEStage_BypassesAlreadyInstalledGuard(t *testing.T) {
+	// Same logic for the already-installed guard.
+	req := newDiscover(t, "58:47:ca:70:c7:c9", iana.EFI_X86_64, "PXEClient", "iPXE")
+	cfg := defaultCfg()
+	cfg.Fleet = fleetCfg(t)
+	cfg.Pending = func(mac string) bool { return false }
+	cfg.LastEvent = func(mac string) fleet.Event { return fleet.EventInstallerDone }
+
+	reply, dec, err := BuildOffer(req, cfg)
+	if err != nil {
+		t.Fatalf("iPXE-stage on installer-done box: want OFFER, got err=%v", err)
+	}
+	if reply == nil {
+		t.Fatal("iPXE-stage must get script URL OFFER even when installer-done")
+	}
+	if dec.Stage != StageIPXEScript {
+		t.Errorf("Decision.Stage = %q, want %q", dec.Stage, StageIPXEScript)
+	}
+}
+
+func TestBuildOffer_AlreadyInstalled_NoPending_SkipsOffer(t *testing.T) {
+	// The load-bearing v0.8.1 invariant (TPM regression-test ask).
+	// installer-done + no pending intent → no OFFER.
+	req := newDiscover(t, "58:47:ca:70:c7:c9", iana.EFI_X86_64, "PXEClient", "")
+	cfg := defaultCfg()
+	cfg.Fleet = fleetCfg(t)
+	cfg.Pending = func(mac string) bool { return false }
+	cfg.LastEvent = func(mac string) fleet.Event { return fleet.EventInstallerDone }
+
+	reply, dec, err := BuildOffer(req, cfg)
+	if !errors.Is(err, ErrSkip) {
+		t.Fatalf("want ErrSkip, got err=%v", err)
+	}
+	if reply != nil {
+		t.Error("installer-done + no pending should produce no reply")
+	}
+	if dec.Skip != SkipAlreadyDeployed {
+		t.Errorf("Decision.Skip = %v, want SkipAlreadyDeployed", dec.Skip)
+	}
+}
+
+func TestBuildOffer_AlreadyInstalled_WithPendingInstall_StillOffers(t *testing.T) {
+	// Operator's explicit PUT /intent re-arms. Pending is the force flag.
+	req := newDiscover(t, "58:47:ca:70:c7:c9", iana.EFI_X86_64, "PXEClient", "")
+	cfg := defaultCfg()
+	cfg.Fleet = fleetCfg(t)
+	cfg.Pending = func(mac string) bool { return true }
+	cfg.LastEvent = func(mac string) fleet.Event { return fleet.EventInstallerDone }
+
+	reply, dec, err := BuildOffer(req, cfg)
+	if err != nil {
+		t.Fatalf("installer-done + pending install: want OFFER, got err=%v", err)
+	}
+	if reply == nil {
+		t.Fatal("pending intent must override the already-installed guard")
+	}
+	if dec.Skip != NotSkipped {
+		t.Errorf("Decision.Skip = %v, want NotSkipped", dec.Skip)
+	}
+}
+
+func TestBuildOffer_UnknownMAC_BypassesAlreadyInstalledGuard(t *testing.T) {
+	// Unknown MACs aren't fleet-known, so the guard never fires for them.
+	req := newDiscover(t, "11:22:33:44:55:66", iana.EFI_X86_64, "PXEClient", "")
+	cfg := defaultCfg()
+	cfg.Fleet = fleetCfg(t)
+	cfg.Pending = func(mac string) bool { return false }
+	cfg.LastEvent = func(mac string) fleet.Event { return fleet.EventInstallerDone }
+
+	reply, _, err := BuildOffer(req, cfg)
+	if err != nil {
+		t.Fatalf("unknown MAC: want OFFER fallback, got err=%v", err)
+	}
+	if reply == nil {
+		t.Fatal("unknown MAC should still get a reply (netboot.xyz fallback)")
+	}
+}
+
 func TestBuildOffer_RejectsBadConfig(t *testing.T) {
 	req := newDiscover(t, "00:00:00:00:00:03", iana.EFI_X86_64, "PXEClient", "")
 	// missing AdvertisedIP
