@@ -69,19 +69,46 @@ type intentPUTBody struct {
 	Action json.RawMessage `json:"action"`
 }
 
+// Error code constants. Stable identifiers — clients should branch on
+// these, not on the prose `message`. New codes are additive; existing
+// codes don't change meaning across releases. v0.9.0+.
+const (
+	ErrCodeFleetNotLoaded      = "fleet_not_loaded"
+	ErrCodePendingNotConfigured = "pending_not_configured"
+	ErrCodeMACMissing          = "mac_missing"
+	ErrCodeMACInvalid          = "mac_invalid"
+	ErrCodeMACNotInFleet       = "mac_not_in_fleet"
+	ErrCodeBodyInvalid         = "body_invalid"
+	ErrCodeActionMissing       = "action_missing"
+	ErrCodeActionInvalid       = "action_invalid"
+	ErrCodeRescueUnimplemented = "rescue_unimplemented"
+	ErrCodePendingFailed       = "pending_failed"
+)
+
+// apiErrorView is the v0.9.0+ structured error response. `code` is the
+// machine-readable identifier clients should branch on; `message` is
+// human-prose; `details` is an optional bag for context (e.g. accepted
+// values, the offending field).
 type apiErrorView struct {
-	Error string `json:"error"`
+	Code    string         `json:"code"`
+	Message string         `json:"message"`
+	Details map[string]any `json:"details,omitempty"`
 }
 
 // apiReady asserts fleet + Pending are wired.
+//
+// v0.9.0: returns 503 (not 404) when fleet mode isn't enabled. 404
+// implied "you have the URL wrong"; the right semantic is "service is
+// up but this part of it isn't configured."
 func (s *Server) apiReady(w http.ResponseWriter) bool {
 	if s.opts.Fleet == nil || s.opts.FleetStatus == nil {
-		writeAPIError(w, http.StatusNotFound,
-			"fleet mode not enabled (start pxe-beacon with -config <fleet.yaml>)")
+		writeAPIError(w, http.StatusServiceUnavailable, ErrCodeFleetNotLoaded,
+			"fleet mode not enabled (start pxe-beacon with -config <fleet.yaml>)", nil)
 		return false
 	}
 	if s.opts.Pending == nil {
-		writeAPIError(w, http.StatusNotFound, "pending-action store not configured")
+		writeAPIError(w, http.StatusServiceUnavailable, ErrCodePendingNotConfigured,
+			"pending-action store not configured", nil)
 		return false
 	}
 	return true
@@ -90,17 +117,21 @@ func (s *Server) apiReady(w http.ResponseWriter) bool {
 func (s *Server) apiExtractFleetMAC(w http.ResponseWriter, r *http.Request) (string, fleet.Profile) {
 	raw := r.PathValue("mac")
 	if raw == "" {
-		writeAPIError(w, http.StatusBadRequest, "missing mac in URL")
+		writeAPIError(w, http.StatusBadRequest, ErrCodeMACMissing, "missing mac in URL", nil)
 		return "", fleet.Profile{}
 	}
 	canon, err := fleet.CanonicalMAC(raw)
 	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid mac: "+err.Error())
+		writeAPIError(w, http.StatusBadRequest, ErrCodeMACInvalid,
+			"invalid mac: "+err.Error(),
+			map[string]any{"input": raw})
 		return "", fleet.Profile{}
 	}
 	p := s.opts.Fleet.Lookup(canon)
 	if p.Name == "" {
-		writeAPIError(w, http.StatusNotFound, "mac "+canon+" is not in fleet.yaml")
+		writeAPIError(w, http.StatusNotFound, ErrCodeMACNotInFleet,
+			"mac "+canon+" is not in fleet.yaml",
+			map[string]any{"mac": canon})
 		return "", fleet.Profile{}
 	}
 	return canon, p
@@ -120,20 +151,23 @@ func (s *Server) handleAPISetIntent(w http.ResponseWriter, r *http.Request) {
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 8192))
 	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, "read body: "+err.Error())
+		writeAPIError(w, http.StatusBadRequest, ErrCodeBodyInvalid,
+			"read body: "+err.Error(), nil)
 		return
 	}
 	var in intentPUTBody
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&in); err != nil {
-		writeAPIError(w, http.StatusBadRequest, "decode body: "+err.Error())
+		writeAPIError(w, http.StatusBadRequest, ErrCodeBodyInvalid,
+			"decode body: "+err.Error(), nil)
 		return
 	}
 	// Require explicit "action" key. A naked {} is ambiguous.
 	if len(in.Action) == 0 {
-		writeAPIError(w, http.StatusBadRequest,
-			`body must include "action" key with value "install", "rescue", or null`)
+		writeAPIError(w, http.StatusBadRequest, ErrCodeActionMissing,
+			`body must include "action" key with value "install", "rescue", or null`,
+			map[string]any{"accepted": []string{"install", "rescue", "null"}})
 		return
 	}
 	// Decode the action value. JSON null → empty string (= cancel).
@@ -141,15 +175,17 @@ func (s *Server) handleAPISetIntent(w http.ResponseWriter, r *http.Request) {
 	var action string
 	if string(in.Action) != "null" {
 		if err := json.Unmarshal(in.Action, &action); err != nil {
-			writeAPIError(w, http.StatusBadRequest,
-				`"action" must be a string or null; got `+string(in.Action))
+			writeAPIError(w, http.StatusBadRequest, ErrCodeActionInvalid,
+				`"action" must be a string or null; got `+string(in.Action),
+				map[string]any{"got": string(in.Action), "accepted": []string{"install", "rescue", "null"}})
 			return
 		}
 	}
 	switch action {
 	case "install":
 		if _, err := s.opts.Pending.Install(mac); err != nil {
-			writeAPIError(w, http.StatusInternalServerError, "install: "+err.Error())
+			writeAPIError(w, http.StatusInternalServerError, ErrCodePendingFailed,
+				"install: "+err.Error(), nil)
 			return
 		}
 		s.logIntent(r, mac, p.Name, "install", 200)
@@ -160,15 +196,17 @@ func (s *Server) handleAPISetIntent(w http.ResponseWriter, r *http.Request) {
 		// intent that silently boots the configured install OS
 		// instead, which is worse than refusing the call.
 		s.logIntent(r, mac, p.Name, "rescue", 501)
-		writeAPIError(w, http.StatusNotImplemented,
-			"rescue boot target not yet wired (tracked for v0.8.2); intent NOT queued")
+		writeAPIError(w, http.StatusNotImplemented, ErrCodeRescueUnimplemented,
+			"rescue boot target not yet wired (tracked for v0.8.2); intent NOT queued",
+			map[string]any{"tracked": "v0.8.2"})
 		return
 	case "":
 		s.opts.Pending.Cancel(mac)
 		s.logIntent(r, mac, p.Name, "cancel", 200)
 	default:
-		writeAPIError(w, http.StatusBadRequest,
-			`action must be "install", "rescue", or null; got `+action)
+		writeAPIError(w, http.StatusBadRequest, ErrCodeActionInvalid,
+			`action must be "install", "rescue", or null; got `+action,
+			map[string]any{"got": action, "accepted": []string{"install", "rescue", "null"}})
 		return
 	}
 	writeJSON(w, s.buildIntentView(mac))
@@ -266,10 +304,21 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = enc.Encode(v)
 }
 
-func writeAPIError(w http.ResponseWriter, code int, msg string) {
+// writeAPIError emits a structured v0.9.0+ error envelope. `status`
+// is the HTTP status code; `code` is the stable machine-readable
+// identifier; `msg` is human prose; `details` is optional context.
+//
+// Clients should branch on `code` (one of the ErrCode* constants),
+// not on `msg` — message text is allowed to change between releases
+// for clarity, codes are not.
+func writeAPIError(w http.ResponseWriter, status int, code, msg string, details map[string]any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(apiErrorView{Error: msg})
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(apiErrorView{
+		Code:    code,
+		Message: msg,
+		Details: details,
+	})
 }
 
 func pendingTTLSeconds(s *pending.Store) int {
@@ -277,6 +326,94 @@ func pendingTTLSeconds(s *pending.Store) int {
 		return 0
 	}
 	return int(s.TTL() / time.Second)
+}
+
+// handleHealthz — GET /healthz. Liveness probe. Returns 200 unconditionally
+// as long as the HTTP server is answering. v0.9.0+.
+//
+// Body: {"status":"ok","uptime_s":N,"started_at":"..."}
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{
+		"status":     "ok",
+		"uptime_s":   int(time.Since(s.startedAt).Seconds()),
+		"started_at": s.startedAt.UTC().Format(time.RFC3339),
+	})
+}
+
+// handleReadyz — GET /readyz. Readiness probe. Returns 200 when Fleet
+// + FleetStatus + Pending are all wired (fleet mode is active); 503
+// otherwise. Body always carries the structured component state so
+// monitoring can pinpoint exactly which subsystem isn't ready.
+// v0.9.0+.
+//
+// Body:
+//
+//	{
+//	  "status": "ok" | "not_ready",
+//	  "components": {
+//	    "fleet":        "ok" | "not_loaded",
+//	    "tracker":      "ok" | "not_loaded",
+//	    "pending":      "ok" | "not_configured"
+//	  },
+//	  "pending_count":  N,    // when pending is loaded
+//	  "tracker_count":  N     // when tracker is loaded
+//	}
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	components := map[string]string{}
+	ready := true
+
+	if s.opts.Fleet != nil {
+		components["fleet"] = "ok"
+	} else {
+		components["fleet"] = "not_loaded"
+		ready = false
+	}
+	if s.opts.FleetStatus != nil {
+		components["tracker"] = "ok"
+	} else {
+		components["tracker"] = "not_loaded"
+		ready = false
+	}
+	if s.opts.Pending != nil {
+		components["pending"] = "ok"
+	} else {
+		components["pending"] = "not_configured"
+		ready = false
+	}
+
+	body := map[string]any{
+		"components": components,
+	}
+	if ready {
+		body["status"] = "ok"
+		// Counts are only meaningful when components are loaded.
+		body["pending_count"] = pendingCount(s.opts.Pending)
+		body["tracker_count"] = trackerCount(s.opts.FleetStatus)
+	} else {
+		body["status"] = "not_ready"
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if !ready {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(body)
+}
+
+func pendingCount(s *pending.Store) int {
+	if s == nil {
+		return 0
+	}
+	return s.Len()
+}
+
+func trackerCount(t *fleet.Tracker) int {
+	if t == nil {
+		return 0
+	}
+	return len(t.Snapshot())
 }
 
 // logIntent writes a structured audit-log line for every PUT /intent

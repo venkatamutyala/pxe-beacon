@@ -158,8 +158,84 @@ func TestAPI_SetIntent_UnknownMAC_404(t *testing.T) {
 	}
 	var errView apiErrorView
 	decode(t, w, &errView)
-	if !strings.Contains(errView.Error, "not in fleet") {
-		t.Errorf("error msg missing 'not in fleet': %q", errView.Error)
+	// v0.9.0: assert structured envelope — `code` is the machine-readable
+	// field clients should branch on, `message` is prose.
+	if errView.Code != ErrCodeMACNotInFleet {
+		t.Errorf("code = %q, want %q", errView.Code, ErrCodeMACNotInFleet)
+	}
+	if !strings.Contains(errView.Message, "not in fleet") {
+		t.Errorf("message missing 'not in fleet': %q", errView.Message)
+	}
+	if errView.Details["mac"] == nil {
+		t.Errorf("details.mac missing: %+v", errView.Details)
+	}
+}
+
+// TestAPI_ErrorCodes locks the v0.9.0 contract: every error response
+// carries a stable machine-readable `code` field. New codes are
+// additive; existing codes don't change meaning across releases.
+func TestAPI_ErrorCodes(t *testing.T) {
+	srv, _, _ := newAPIServer(t)
+	mac := "58:47:ca:70:c7:c9"
+
+	cases := []struct {
+		name       string
+		method     string
+		path       string
+		body       string
+		wantStatus int
+		wantCode   string
+	}{
+		{"mac_invalid", "PUT", "/api/v1/machines/not-a-mac/intent", `{"action":"install"}`, 400, ErrCodeMACInvalid},
+		{"mac_not_in_fleet", "PUT", "/api/v1/machines/11:22:33:44:55:66/intent", `{"action":"install"}`, 404, ErrCodeMACNotInFleet},
+		{"action_missing", "PUT", "/api/v1/machines/" + mac + "/intent", `{}`, 400, ErrCodeActionMissing},
+		{"action_invalid", "PUT", "/api/v1/machines/" + mac + "/intent", `{"action":"frobnicate"}`, 400, ErrCodeActionInvalid},
+		{"action_wrong_type", "PUT", "/api/v1/machines/" + mac + "/intent", `{"action":42}`, 400, ErrCodeActionInvalid},
+		{"body_invalid", "PUT", "/api/v1/machines/" + mac + "/intent", `not json`, 400, ErrCodeBodyInvalid},
+		{"rescue_unimplemented", "PUT", "/api/v1/machines/" + mac + "/intent", `{"action":"rescue"}`, 501, ErrCodeRescueUnimplemented},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := doLoopback(srv, c.method, c.path, c.body)
+			if w.Code != c.wantStatus {
+				t.Fatalf("status = %d, want %d. body=%s", w.Code, c.wantStatus, w.Body.String())
+			}
+			var ev apiErrorView
+			decode(t, w, &ev)
+			if ev.Code != c.wantCode {
+				t.Errorf("code = %q, want %q. body=%s", ev.Code, c.wantCode, w.Body.String())
+			}
+			if ev.Message == "" {
+				t.Errorf("message must be non-empty. body=%s", w.Body.String())
+			}
+		})
+	}
+}
+
+// TestAPI_FleetNotLoaded_Returns503 — v0.9.0 fixes the wrong-status
+// bug: "fleet mode not enabled" used to return 404 (which suggested
+// the URL was wrong); correct semantic is 503 Service Unavailable
+// (URL is right, the feature isn't configured).
+func TestAPI_FleetNotLoaded_Returns503(t *testing.T) {
+	// Build a server with NO fleet wired.
+	srv, err := New(Options{
+		Listen:       "127.0.0.1:0",
+		AdvertisedIP: "127.0.0.1",
+		HTTPPort:     8080,
+		Logger:       narrlog.New("test", narrlog.LevelDebug, nil),
+		// Fleet, FleetStatus, Pending all nil.
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := doLoopback(srv, "PUT", "/api/v1/machines/58:47:ca:70:c7:c9/intent", `{"action":"install"}`)
+	if w.Code != 503 {
+		t.Fatalf("fleet-not-loaded: want 503, got %d body=%s", w.Code, w.Body.String())
+	}
+	var ev apiErrorView
+	decode(t, w, &ev)
+	if ev.Code != ErrCodeFleetNotLoaded {
+		t.Errorf("code = %q, want %q", ev.Code, ErrCodeFleetNotLoaded)
 	}
 }
 
@@ -263,6 +339,88 @@ func TestAPI_NonLoopback_403(t *testing.T) {
 	srv.mux.ServeHTTP(w, req)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("non-loopback: want 403, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestAPI_Healthz(t *testing.T) {
+	srv, _, _ := newAPIServer(t)
+	w := doLoopback(srv, "GET", "/healthz", "")
+	if w.Code != 200 {
+		t.Fatalf("healthz: status %d", w.Code)
+	}
+	var body map[string]any
+	decode(t, w, &body)
+	if body["status"] != "ok" {
+		t.Errorf("healthz status = %v, want ok", body["status"])
+	}
+}
+
+func TestAPI_Readyz_Ready(t *testing.T) {
+	srv, _, _ := newAPIServer(t) // fully wired
+	w := doLoopback(srv, "GET", "/readyz", "")
+	if w.Code != 200 {
+		t.Fatalf("readyz (wired): status %d body=%s", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	decode(t, w, &body)
+	if body["status"] != "ok" {
+		t.Errorf("readyz status = %v, want ok", body["status"])
+	}
+	comps, _ := body["components"].(map[string]any)
+	if comps["fleet"] != "ok" || comps["tracker"] != "ok" || comps["pending"] != "ok" {
+		t.Errorf("components not all ok: %+v", comps)
+	}
+}
+
+func TestAPI_Readyz_NotReady_503(t *testing.T) {
+	srv, err := New(Options{
+		Listen:       "127.0.0.1:0",
+		AdvertisedIP: "127.0.0.1",
+		HTTPPort:     8080,
+		Logger:       narrlog.New("test", narrlog.LevelDebug, nil),
+		// no Fleet/FleetStatus/Pending
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := doLoopback(srv, "GET", "/readyz", "")
+	if w.Code != 503 {
+		t.Fatalf("readyz (unwired): want 503, got %d", w.Code)
+	}
+	var body map[string]any
+	decode(t, w, &body)
+	if body["status"] != "not_ready" {
+		t.Errorf("readyz status = %v, want not_ready", body["status"])
+	}
+}
+
+func TestStatusJSON_UnifiedShape_AndDeprecated(t *testing.T) {
+	// v0.9.0: /status.json now returns the SAME nested {desired,
+	// observed} shape as /api/v1/machines, and carries a Deprecation
+	// header pointing at the successor.
+	srv, pSt, _ := newAPIServer(t)
+	_, _ = pSt.Install("58:47:ca:70:c7:c9")
+
+	w := doLoopback(srv, "GET", "/status.json", "")
+	if w.Code != 200 {
+		t.Fatalf("status.json: %d", w.Code)
+	}
+	if w.Header().Get("Deprecation") != "true" {
+		t.Error("status.json must carry Deprecation: true")
+	}
+	if !strings.Contains(w.Header().Get("Link"), "/api/v1/machines") {
+		t.Errorf("status.json Link should point at successor, got %q", w.Header().Get("Link"))
+	}
+	var body struct {
+		Machines []machineAPIView `json:"machines"`
+	}
+	decode(t, w, &body)
+	if len(body.Machines) != 1 {
+		t.Fatalf("want 1 machine, got %d", len(body.Machines))
+	}
+	// The nested desired.action must be present — proves shape unity.
+	if body.Machines[0].Desired.Action != "install" {
+		t.Errorf("status.json should use nested desired.action, got %+v", body.Machines[0])
 	}
 }
 

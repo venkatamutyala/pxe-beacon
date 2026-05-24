@@ -28,7 +28,14 @@ var eventOrder = map[Event]int{
 	EventInstallerDone:   5,
 }
 
-// Status is the public snapshot for one machine.
+// Status is the per-machine in-memory snapshot used by the HTML
+// status page. The JSON API surface (/api/v1/machines, /status.json)
+// renders machineAPIView in the httpd package instead, so this
+// struct's json tags don't appear on the wire post-v0.9.0.
+//
+// v0.9.0 dropped the DesiredAction/RequestedAt/ExpiresAt fields;
+// arming state lives in the pending package and is joined into the
+// httpd view at request time.
 type Status struct {
 	MAC      string    `json:"mac"`
 	Name     string    `json:"name,omitempty"`
@@ -37,15 +44,6 @@ type Status struct {
 	LastSeen time.Time `json:"last_seen,omitempty"`
 	Stalled  bool      `json:"stalled,omitempty"`
 	Events   []Event   `json:"events,omitempty"`
-
-	// Desired-action fields (v0.8.0+, K8s-style). Populated by the
-	// httpd snapshot handler from the pending package; fleet itself
-	// does not import pending to avoid a dependency cycle.
-	//
-	// DesiredAction is "install" / "rescue" / "" (none).
-	DesiredAction string    `json:"desired_action,omitempty"`
-	RequestedAt   time.Time `json:"requested_at,omitempty"`
-	ExpiresAt     time.Time `json:"expires_at,omitempty"`
 }
 
 // Tracker is the in-memory store of per-MAC live status. Safe for

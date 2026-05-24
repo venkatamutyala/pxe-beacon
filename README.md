@@ -292,6 +292,37 @@ before restarting in production. Persistent tracker is a v0.9 task.
 **No sticky install mode:** each install cycle requires a fresh `PUT
 /intent`. `-pending-ttl=0` works for indefinite-pending semantics.
 
+#### Error responses (v0.9.0+)
+
+Every `/api/v1/*` error response is a structured JSON envelope:
+
+```json
+{
+  "code": "mac_not_in_fleet",
+  "message": "mac 11:22:33:44:55:66 is not in fleet.yaml",
+  "details": {"mac": "11:22:33:44:55:66"}
+}
+```
+
+Clients should branch on `code` (stable identifier — added codes are
+additive, existing codes don't change meaning across releases). The
+`message` is human prose and may be reworded for clarity.
+
+Codes shipped in v0.9.0:
+
+| code | http | meaning |
+|---|---|---|
+| `fleet_not_loaded` | 503 | server started without `-config <fleet.yaml>` |
+| `pending_not_configured` | 503 | no pending-action store wired (internal misconfiguration) |
+| `mac_missing` | 400 | URL path was missing the `{mac}` segment |
+| `mac_invalid` | 400 | `{mac}` couldn't be parsed as a MAC address |
+| `mac_not_in_fleet` | 404 | MAC is well-formed but not in `fleet.yaml` |
+| `body_invalid` | 400 | request body couldn't be parsed as JSON |
+| `action_missing` | 400 | body is JSON but the `action` key isn't present |
+| `action_invalid` | 400 | `action` value isn't `install`, `rescue`, or `null` |
+| `rescue_unimplemented` | 501 | rescue boot target not yet wired (tracked for v0.8.2) |
+| `pending_failed` | 500 | internal error in the pending store |
+
 **Cloud-init phone_home:** the example user-data files include a
 `phone_home` block that tells cloud-init to POST to pxe-beacon when
 the install finishes. That transition flips the machine to

@@ -134,6 +134,15 @@ func (s *Store) TTL() time.Duration {
 	return s.ttl
 }
 
+// Len returns the number of entries currently in the store, including
+// any that have expired but not yet been reaped. Intended for the
+// /readyz probe; not a precise "currently-pending" count.
+func (s *Store) Len() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.entries)
+}
+
 // RetainOnly drops every entry whose canonical MAC is not accepted by
 // `known`. Returns the number of entries removed and a slice of the
 // dropped MACs for logging.

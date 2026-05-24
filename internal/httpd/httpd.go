@@ -208,6 +208,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /autoinstall/{mac}/done", s.handleInstallerDone)
 	s.mux.HandleFunc("GET /status", s.handleStatusHTML)
 	s.mux.HandleFunc("GET /status.json", s.handleStatusJSON)
+
+	// v0.9.0: health probes. /healthz is "the binary is alive and
+	// answering HTTP"; /readyz is "the binary is configured and
+	// ready to do its job". Distinguishing them matches kubelet /
+	// load-balancer conventions.
+	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	s.mux.HandleFunc("GET /assets/{target}/{file}", s.handleAsset)
 
 	// v0.8.0: K8s-style declarative boot-intent API. Hard-cut from
@@ -824,22 +831,23 @@ func (s *Server) handleAsset(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleStatusJSON renders the in-memory tracker snapshot as JSON.
-// Stable shape; safe to consume from monitoring / scripts.
+//
+// v0.9.0: shape unified with GET /api/v1/machines — nested
+// {desired, observed} per machine — so UI consumers don't write two
+// parsers. Deprecation header points at /api/v1/machines; this URL
+// will be removed in v0.10.
+//
+// v0.9.0 also fixes the silent-corrupt-on-encode-error bug: we now
+// buffer-then-flush so an encode failure becomes a 500, not a
+// truncated 200.
 func (s *Server) handleStatusJSON(w http.ResponseWriter, r *http.Request) {
 	if !s.fleetReady(w) {
 		return
 	}
-	snap := s.opts.FleetStatus.Snapshot()
-	// v0.8.0: enrich each row with the desired action (K8s-style).
-	if s.opts.Pending != nil {
-		for i := range snap {
-			action, at, exp, ok := s.opts.Pending.Status(snap[i].MAC)
-			if ok {
-				snap[i].DesiredAction = string(action)
-				snap[i].RequestedAt = at
-				snap[i].ExpiresAt = exp
-			}
-		}
+	machines := s.opts.Fleet.ListMachines()
+	out := make([]machineAPIView, 0, len(machines))
+	for _, m := range machines {
+		out = append(out, s.buildMachineView(m.MAC, m.Profile))
 	}
 	payload := map[string]any{
 		"server": map[string]any{
@@ -849,14 +857,27 @@ func (s *Server) handleStatusJSON(w http.ResponseWriter, r *http.Request) {
 			"started_at":    s.startedAt.UTC().Format(time.RFC3339),
 			"pending_ttl_s": pendingTTLSeconds(s.opts.Pending),
 		},
-		"machines": snap,
+		"machines": out,
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	enc := json.NewEncoder(w)
+
+	// Buffer first, then flush — so an encode error becomes a 500
+	// (not a partial 200 with truncated JSON).
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(payload); err != nil {
 		s.log.Warnf("GET /status.json: encode error: %v", err)
+		http.Error(w, "encode error", http.StatusInternalServerError)
+		return
 	}
+	// v0.9.0: deprecation marker (RFC 8594). Points clients at the
+	// canonical /api/v1/machines resource. /status.json is scheduled
+	// for removal in v0.10.
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Deprecation", "true")
+	w.Header().Set("Link", `</api/v1/machines>; rel="successor-version"`)
+	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
+	_, _ = w.Write(buf.Bytes())
 }
 
 // handleStatusHTML renders the same data as a plain auto-refreshing
