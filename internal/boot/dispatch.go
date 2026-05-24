@@ -287,15 +287,17 @@ func writeMachineErrorBlocks(buf *bytes.Buffer, label, target, srcURL string) {
 	w("reboot")
 }
 
-// labelOf produces a stable iPXE label for a machine. iPXE labels are
-// ASCII, no spaces. Use "m_" prefix + name (if it parses) or MAC-hyp
-// fallback.
+// labelOf produces an iPXE-safe label for a machine. v0.5.15: confirmed
+// by venkat@'s shell test that iPXE's goto silently no-ops on labels
+// containing hyphens (`goto foo-label-that-does-not-exist` produces
+// no error, execution falls through). Restrict labels to
+// [a-zA-Z0-9_] only — replace every other character (including '-'
+// and '.') with '_'.
 func labelOf(mac, name string) string {
 	id := name
 	if id == "" {
-		id = strings.ReplaceAll(mac, ":", "-")
+		id = strings.ReplaceAll(mac, ":", "_")
 	}
-	// iPXE labels: alnum + underscore + dot + dash. Sanitize.
 	out := make([]byte, 0, len(id)+2)
 	out = append(out, 'm', '_')
 	for i := 0; i < len(id); i++ {
@@ -304,7 +306,7 @@ func labelOf(mac, name string) string {
 		case c >= 'a' && c <= 'z',
 			c >= 'A' && c <= 'Z',
 			c >= '0' && c <= '9',
-			c == '_' || c == '-' || c == '.':
+			c == '_':
 			out = append(out, c)
 		default:
 			out = append(out, '_')

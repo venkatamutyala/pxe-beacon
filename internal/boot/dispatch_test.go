@@ -58,13 +58,13 @@ machines:
 
 	for _, want := range []string{
 		// Dispatch line for the user's MAC.
-		"iseq ${net0/mac:hexhyp} 58-47-ca-70-c7-c9 && goto m_venkat-1",
+		"iseq ${net0/mac:hexhyp} 58-47-ca-70-c7-c9 && goto m_venkat_1",
 		// v0.5.13: dhcp at top of script (not per arm). Cleaner +
 		// preserves any netmask widening from being overwritten.
 		"dhcp || goto top_fail_dhcp",
 		":top_fail_dhcp",
 		// Per-machine block label.
-		":m_venkat-1",
+		":m_venkat_1",
 		// HTTP not HTTPS for d-i (PXE expert fix #2).
 		"http://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot/debian-installer/amd64/linux",
 		// preseed URL points back at pxe-beacon.
@@ -79,10 +79,10 @@ machines:
 		// v0.5.3: control flow uses explicit gotos to avoid the
 		// `cmd || X && Y && reboot` precedence trap. Each fail path
 		// has its own labeled block.
-		"goto m_venkat-1_fail_kernel",
-		":m_venkat-1_fail_kernel",
-		"goto m_venkat-1_fail_boot",
-		":m_venkat-1_fail_boot",
+		"goto m_venkat_1_fail_kernel",
+		":m_venkat_1_fail_kernel",
+		"goto m_venkat_1_fail_boot",
+		":m_venkat_1_fail_boot",
 		// Default fallback arm still present.
 		":target_default",
 	} {
@@ -136,8 +136,8 @@ machines:
 		{"ubuntu autoinstall trailing ---", "autoinstall ds=nocloud-net"},
 		{"custom chain to operator script", "/autoinstall/11-22-33-44-55-66/autoexec.ipxe"},
 		{"menu arm chains netboot.xyz", "boot.netboot.xyz/menu.ipxe"},
-		{"dispatch entry for debian-host", "iseq ${net0/mac:hexhyp} 58-47-ca-70-c7-c9 && goto m_debian-host"},
-		{"dispatch entry for ubuntu-host", "iseq ${net0/mac:hexhyp} aa-bb-cc-dd-ee-01 && goto m_ubuntu-host"},
+		{"dispatch entry for debian-host", "iseq ${net0/mac:hexhyp} 58-47-ca-70-c7-c9 && goto m_debian_host"},
+		{"dispatch entry for ubuntu-host", "iseq ${net0/mac:hexhyp} aa-bb-cc-dd-ee-01 && goto m_ubuntu_host"},
 	}
 	for _, c := range cases {
 		if !strings.Contains(s, c.want) {
@@ -147,12 +147,18 @@ machines:
 }
 
 func TestDispatch_LabelOf_Sanitizes(t *testing.T) {
-	// Names with spaces / weird chars must produce valid iPXE labels.
+	// v0.5.15: labels are [a-zA-Z0-9_] only. Hyphens, dots, slashes,
+	// spaces, etc. all become '_'. (iPXE's goto silently no-ops on
+	// hyphenated labels on some builds — confirmed by venkat@'s
+	// shell test.)
 	if got := labelOf("58:47:ca:70:c7:c9", "foo bar/baz"); got != "m_foo_bar_baz" {
 		t.Errorf("labelOf sanitize = %q, want m_foo_bar_baz", got)
 	}
-	// No name → MAC fallback.
-	if got := labelOf("58:47:ca:70:c7:c9", ""); got != "m_58-47-ca-70-c7-c9" {
-		t.Errorf("labelOf empty name = %q, want m_58-47-ca-70-c7-c9", got)
+	if got := labelOf("58:47:ca:70:c7:c9", "venkat-1"); got != "m_venkat_1" {
+		t.Errorf("labelOf hyphen = %q, want m_venkat_1", got)
+	}
+	// No name → MAC fallback, underscores instead of hyphens.
+	if got := labelOf("58:47:ca:70:c7:c9", ""); got != "m_58_47_ca_70_c7_c9" {
+		t.Errorf("labelOf empty name = %q, want m_58_47_ca_70_c7_c9", got)
 	}
 }
