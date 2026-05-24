@@ -67,7 +67,7 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("# the boot story unfold.")
 	w("")
 	w("echo ============================================================")
-	w("echo  pxe-beacon dispatch (v0.6.7) — Rocky 9 + AlmaLinux 9 support")
+	w("echo  pxe-beacon dispatch (v0.6.9) — console-order fix + BOOTIF + debconf debug")
 	w("echo ============================================================")
 	w("echo")
 	w("echo [stage 0/5] iPXE settings BEFORE dhcp")
@@ -213,7 +213,20 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	assetsBase := func(target string) string {
 		return fmt.Sprintf("http://%s:%d/assets/%s", ctx.AdvertisedIP, ctx.HTTPPort, target)
 	}
-	consoleArgs := "console=tty0 console=ttyS0,115200n8"
+	// v0.6.9: tty0 LAST. With Linux multi-console, dmesg goes to all
+	// consoles but the d-i UI (userspace stdout) goes only to the
+	// LAST one listed. Putting tty0 last means the screen shows d-i;
+	// boxes with serial cables also see everything via dmesg. The
+	// previous order (tty0 first) sent d-i to ttyS0 — invisible
+	// without a serial cable, which looked like a freeze after
+	// firmware-load warnings.
+	consoleArgs := "console=ttyS0,115200n8 console=tty0"
+	// v0.6.9: BOOTIF and verbose debconf. BOOTIF tells d-i which NIC
+	// PXE booted from (avoids netcfg picking the wrong interface — e.g.
+	// a WiFi NIC with no firmware loaded). DEBCONF_DEBUG=5 logs full
+	// debconf transcript to /var/log/syslog inside d-i for post-mortem.
+	bootifArg := "BOOTIF=01-${net0/mac:hexhyp}"
+	debugArg := "DEBCONF_DEBUG=5"
 
 	// v0.6.0: when -client-netmask was used to widen iPXE's netmask
 	// for cross-/24 routing to pxe-beacon, we also need to pass the
@@ -306,8 +319,8 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 		fmt.Fprintf(buf, "echo pxe-beacon: ip=${ip} gw=${gateway} dns=${dns}\n")
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching Debian 12 d-i kernel: %s/linux\n", mirror)
 		fmt.Fprintf(buf,
-			"kernel --name linux %s/linux auto=true priority=critical %s url=%s %s --- || goto %s_fail_kernel\n",
-			mirror, ipArg, preseedURL, consoleArgs, label)
+			"kernel --name linux %s/linux auto=true priority=critical %s %s %s url=%s %s --- || goto %s_fail_kernel\n",
+			mirror, ipArg, bootifArg, debugArg, preseedURL, consoleArgs, label)
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching initrd: %s/initrd.gz\n", mirror)
 		fmt.Fprintf(buf, "initrd --name initrd.gz %s/initrd.gz || goto %s_fail_initrd\n", mirror, label)
 		w("echo pxe-beacon: handing control to d-i (boot)...")
@@ -319,8 +332,8 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 		fmt.Fprintf(buf, "echo pxe-beacon: ip=${ip} gw=${gateway} dns=${dns}\n")
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching Debian 13 d-i kernel: %s/linux\n", mirror)
 		fmt.Fprintf(buf,
-			"kernel --name linux %s/linux auto=true priority=critical %s url=%s %s --- || goto %s_fail_kernel\n",
-			mirror, ipArg, preseedURL, consoleArgs, label)
+			"kernel --name linux %s/linux auto=true priority=critical %s %s %s url=%s %s --- || goto %s_fail_kernel\n",
+			mirror, ipArg, bootifArg, debugArg, preseedURL, consoleArgs, label)
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching initrd: %s/initrd.gz\n", mirror)
 		fmt.Fprintf(buf, "initrd --name initrd.gz %s/initrd.gz || goto %s_fail_initrd\n", mirror, label)
 		w("echo pxe-beacon: handing control to d-i (boot)...")
@@ -353,8 +366,8 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 		fmt.Fprintf(buf, "echo pxe-beacon: ip=${ip} gw=${gateway} dns=${dns}\n")
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching %s kernel: %s/vmlinuz\n", label2, mirror)
 		fmt.Fprintf(buf,
-			"kernel --name vmlinuz %s/vmlinuz initrd=initrd.img inst.repo=%s inst.ks=%s %s %s --- || goto %s_fail_kernel\n",
-			mirror, repoBase, kickstartURL, ipArg, consoleArgs, label)
+			"kernel --name vmlinuz %s/vmlinuz initrd=initrd.img inst.repo=%s inst.ks=%s %s %s %s --- || goto %s_fail_kernel\n",
+			mirror, repoBase, kickstartURL, ipArg, bootifArg, consoleArgs, label)
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching %s initrd: %s/initrd.img\n", label2, mirror)
 		fmt.Fprintf(buf, "initrd --name initrd.img %s/initrd.img || goto %s_fail_initrd\n", mirror, label)
 		fmt.Fprintf(buf, "echo pxe-beacon: handing control to Anaconda (boot)...\n")
@@ -370,8 +383,8 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 		// it Subiquity prompts. Order: cmdline args, then ---, then
 		// initrd.
 		fmt.Fprintf(buf,
-			"kernel --name vmlinuz %s/vmlinuz initrd=initrd %s ipv6.disable=1 boot=casper url=%s/filesystem.squashfs %s autoinstall ds=nocloud-net\\;s=%s --- || goto %s_fail_kernel\n",
-			assets, ipArg, assets, consoleArgs, autoinstallBase, label)
+			"kernel --name vmlinuz %s/vmlinuz initrd=initrd %s %s ipv6.disable=1 boot=casper url=%s/filesystem.squashfs %s autoinstall ds=nocloud-net\\;s=%s --- || goto %s_fail_kernel\n",
+			assets, ipArg, bootifArg, assets, consoleArgs, autoinstallBase, label)
 		fmt.Fprintf(buf, "initrd --name initrd %s/initrd || goto %s_fail_initrd\n", assets, label)
 		w("echo pxe-beacon: handing control to Subiquity (boot)...")
 		fmt.Fprintf(buf, "boot || goto %s_fail_boot\n", label)
