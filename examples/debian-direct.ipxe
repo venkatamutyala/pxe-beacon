@@ -1,0 +1,23 @@
+#!ipxe
+# pxe-beacon: boot: custom workaround that bypasses the autoexec→HTTP
+# chain. iPXE here is loaded via TFTP, then immediately boots Debian
+# d-i with kernel cmdline directly — no second HTTP roundtrip needed
+# to learn what to boot. Use this while v0.4.x autoexec.ipxe dispatch
+# is being debugged.
+#
+# Templated by pxe-beacon: {{.Name}}, {{.MAC}}, {{.MACHyp}},
+# {{.AdvertisedIP}}, {{.HTTPPort}}. The preseed.cfg URL points at the
+# pxe-beacon route (which works in v0.3+ regardless of the autoexec
+# dispatch state).
+echo pxe-beacon: {{.Name}} ({{.MAC}}) -> Debian 12 direct (no autoexec dispatch)
+
+imgfree
+kernel --name linux \
+  https://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot/debian-installer/amd64/linux \
+  auto=true priority=critical \
+  ip=dhcp \
+  url=http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}/preseed.cfg \
+  ---
+initrd --name initrd.gz \
+  https://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot/debian-installer/amd64/initrd.gz
+boot || shell

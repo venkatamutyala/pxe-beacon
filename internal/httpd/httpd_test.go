@@ -550,7 +550,11 @@ func TestHTTP_Preseed_AppendsCloudInitBridge(t *testing.T) {
 	}
 }
 
-func TestHTTP_Preseed_InteractiveStubWhenNoPreseed(t *testing.T) {
+func TestHTTP_Preseed_UsesEmbeddedDefaultWhenOmitted_v050(t *testing.T) {
+	// v0.5.0: omitting `preseed:` on a debian-12/13 entry no longer
+	// returns an interactive stub — pxe-beacon serves the embedded
+	// default preseed (the user can override via /admin or by
+	// dropping a file at <data-dir>/templates/defaults/debian-preseed.cfg).
 	addr, _ := startFleetServerWithPreseed(t)
 	resp, err := http.Get("http://" + addr + "/autoinstall/11-22-33-44-55-66/preseed.cfg")
 	if err != nil {
@@ -559,11 +563,19 @@ func TestHTTP_Preseed_InteractiveStubWhenNoPreseed(t *testing.T) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	s := string(body)
-	if !strings.Contains(s, "no preseed configured") {
-		t.Errorf("expected interactive-stub explanation:\n%s", s)
+	if !strings.Contains(s, "d-i debian-installer/locale") {
+		t.Errorf("expected embedded default preseed directives:\n%s", s)
 	}
-	if strings.Contains(s, "d-i debian-installer/locale") {
-		t.Errorf("interactive stub should NOT include preseed directives:\n%s", s)
+	if !strings.Contains(s, "d-i passwd/username string pxe") {
+		t.Errorf("expected the default pxe user:\n%s", s)
+	}
+	// Bridge appended automatically because no operator preseed was
+	// supplied (signals "use embedded default + bridge").
+	if !strings.Contains(s, "cloud-init bridge") {
+		t.Errorf("bridge should be auto-appended when using embedded default preseed:\n%s", s)
+	}
+	if !strings.Contains(s, "datasource_list: [NoCloud, None]") {
+		t.Errorf("bridge should pin cloud-init datasource (PXE expert fix #4):\n%s", s)
 	}
 }
 

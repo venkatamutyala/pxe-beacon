@@ -58,7 +58,8 @@ func main() {
 		flagCrossCert  = flag.Bool("crosscert", false, "emit `set crosscert http://ca.ipxe.org/auto` in boot.ipxe (helps older iPXE builds with HTTPS netboot.xyz)")
 		flagHintAfter  = flag.Duration("hint-after", 10*time.Second, "log a 'client never fetched' hint this long after an OFFER if no follow-up arrives (0 disables)")
 		flagConfig     = flag.String("config", "", "path to fleet.yaml — enables per-MAC routing, autoinstall, and /status page (unset = v0.1.3 single-machine behavior)")
-		flagDataDir    = flag.String("data-dir", defaultDataDir(), "directory holding extracted distro assets (populated by `pxe-beacon fetch`); served at /assets/<target>/<file>")
+		flagDataDir    = flag.String("data-dir", defaultDataDir(), "directory holding extracted distro assets (populated by `pxe-beacon fetch`); also where template overrides under templates/ live; served at /assets/<target>/<file>")
+		flagLegacyRdir = flag.Bool("legacy-redirector", false, "v0.4.x behavior: serve a TFTP redirector that chains iPXE to HTTP /autoinstall/<mac>/autoexec.ipxe. Default (v0.5.0+) serves a self-contained dispatch script. Use this flag to bisect if v0.5.0 breaks your boot.")
 		flagPrintVer   = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Usage = func() {
@@ -139,14 +140,32 @@ func main() {
 		os.Exit(1)
 	}
 
-	// In fleet mode, serve the autoexec.ipxe redirector via TFTP so
-	// netboot.xyz iPXE will fetch our per-MAC HTTP script.
+	// v0.5.0: TFTP autoexec.ipxe is a self-contained per-MAC dispatch
+	// script generated from the live fleet config. No HTTP chain
+	// dependency. Operators can opt back into the v0.4.x redirector
+	// via -legacy-redirector if they're bisecting a regression.
 	var autoexecFn tftpd.AutoexecRedirector
 	if *flagConfig != "" {
-		autoexecFn = func() []byte {
-			return boot.RedirectorScript(advIP.String(), *flagHTTPPort)
+		if *flagLegacyRdir {
+			log.Warnf("using v0.4.x legacy redirector (per -legacy-redirector flag)")
+			autoexecFn = func() []byte {
+				return boot.RedirectorScript(advIP.String(), *flagHTTPPort)
+			}
+		} else {
+			dctx := boot.DispatchContext{
+				AdvertisedIP: advIP.String(),
+				HTTPPort:     *flagHTTPPort,
+			}
+			autoexecFn = func() []byte {
+				return boot.RenderDispatch(fl, dctx)
+			}
 		}
 	}
+
+	// Wire the template-override directory so disk overrides (placed
+	// at <data-dir>/templates/<rel>) take precedence over the
+	// embedded baseline. Empty data-dir disables.
+	assets.SetOverrideDir(*flagDataDir)
 
 	tftpSrv, err := tftpd.New(tftpd.Options{
 		Listen:   *flagTFTPListen,

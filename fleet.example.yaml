@@ -16,9 +16,16 @@ defaults:
 # Relative paths are resolved from this file's directory.
 machines:
   - mac: 58:47:ca:70:c7:c9
-    name: kube-1
-    boot: ubuntu-22.04
-    cloud_init: ./examples/kube-node.yaml
+    name: db-primary
+    boot: debian-12
+    # Debian needs preseed.cfg for unattended install (d-i doesn't read
+    # cloud-init / NoCloud). cloud_init is OPTIONAL — when both are set,
+    # pxe-beacon appends a late_command to the preseed that installs
+    # cloud-init on the target and seeds it with your user-data so it
+    # runs on first boot of the installed system. See
+    # examples/debian-preseed.cfg for a starting template.
+    preseed: ./examples/debian-preseed.cfg
+    cloud_init: ./examples/debian-db.yaml
 
   - mac: aa:bb:cc:dd:ee:01
     name: kube-2

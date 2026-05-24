@@ -267,15 +267,25 @@ func (s *Server) handleUserData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := s.opts.Fleet.Lookup(mac)
-	if p.CloudInit == "" {
-		http.Error(w, fmt.Sprintf("no cloud_init configured for mac %s (boot=%s)", mac, p.Boot), http.StatusNotFound)
-		return
-	}
-	raw, err := os.ReadFile(p.CloudInit)
-	if err != nil {
-		s.log.Errorf("GET %s -> 500 read cloud_init: %v", r.URL.Path, err)
-		http.Error(w, fmt.Sprintf("read cloud_init: %v", err), http.StatusInternalServerError)
-		return
+	var raw []byte
+	var err error
+	if p.CloudInit != "" {
+		raw, err = os.ReadFile(p.CloudInit)
+		if err != nil {
+			s.log.Errorf("GET %s -> 500 read cloud_init: %v", r.URL.Path, err)
+			http.Error(w, fmt.Sprintf("read cloud_init: %v", err), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		// v0.5.0: no cloud_init in fleet.yaml → embedded default
+		// (or operator override at <data-dir>/templates/defaults/
+		// cloud-init.yaml).
+		raw, err = assets.ReadDefault("cloud-init.yaml")
+		if err != nil {
+			s.log.Errorf("GET %s -> 500 read default cloud-init: %v", r.URL.Path, err)
+			http.Error(w, fmt.Sprintf("default cloud-init: %v", err), http.StatusInternalServerError)
+			return
+		}
 	}
 	tmpl, err := template.New("user-data").Parse(string(raw))
 	if err != nil {
@@ -341,13 +351,28 @@ func (s *Server) handlePreseed(w http.ResponseWriter, r *http.Request) {
 
 	var body []byte
 
+	// v0.5.0: if operator didn't supply preseed:, fall back to the
+	// embedded default (which can be overridden via the admin UI by
+	// editing <data-dir>/templates/defaults/debian-preseed.cfg).
+	var raw []byte
+	var rerr error
 	if p.Preseed != "" {
-		raw, err := os.ReadFile(p.Preseed)
-		if err != nil {
-			s.log.Errorf("GET %s -> 500 read preseed: %v", r.URL.Path, err)
-			http.Error(w, fmt.Sprintf("read preseed: %v", err), http.StatusInternalServerError)
+		raw, rerr = os.ReadFile(p.Preseed)
+		if rerr != nil {
+			s.log.Errorf("GET %s -> 500 read preseed: %v", r.URL.Path, rerr)
+			http.Error(w, fmt.Sprintf("read preseed: %v", rerr), http.StatusInternalServerError)
 			return
 		}
+	} else if p.Boot == "debian-12" || p.Boot == "debian-13" {
+		raw, rerr = assets.ReadDefault("debian-preseed.cfg")
+		if rerr != nil {
+			s.log.Errorf("GET %s -> 500 read default preseed: %v", r.URL.Path, rerr)
+			http.Error(w, fmt.Sprintf("default preseed: %v", rerr), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if raw != nil {
 		tmpl, err := template.New("preseed").Parse(string(raw))
 		if err != nil {
 			http.Error(w, fmt.Sprintf("parse preseed template: %v", err), http.StatusInternalServerError)
@@ -360,13 +385,14 @@ func (s *Server) handlePreseed(w http.ResponseWriter, r *http.Request) {
 		}
 		body = buf.Bytes()
 
-		// Append the cloud-init bridge if a cloud_init file was
-		// also configured. We add it as an extra preseed directive
-		// rather than editing whatever the operator wrote — if
-		// their preseed already has a late_command we want both
-		// to run, and Debian preseed concatenates multiple
-		// late_command lines.
-		if p.CloudInit != "" {
+		// Always append the cloud-init bridge when CloudInit is set
+		// OR we used the embedded default preseed (which assumes
+		// cloud-init.yaml will be served as user-data too — possibly
+		// the embedded default). Bridge installs cloud-init on the
+		// target + seeds /var/lib/cloud/seed/nocloud/ on first boot.
+		// PXE expert fix #4: bridge also pins datasource_list so
+		// cloud-init doesn't waste 120s probing Ec2/Azure/GCP.
+		if p.CloudInit != "" || p.Preseed == "" {
 			bridge := renderCloudInitBridge(tvars)
 			if !bytes.HasSuffix(body, []byte("\n")) {
 				body = append(body, '\n')
@@ -374,12 +400,10 @@ func (s *Server) handlePreseed(w http.ResponseWriter, r *http.Request) {
 			body = append(body, bridge...)
 		}
 	} else {
-		// Stub — d-i fetches this, finds no preseed answers, falls
-		// through to interactive. Comment block tells the operator
-		// why and how to make it unattended.
 		body = []byte(`# pxe-beacon: no preseed configured for ` + mac + `
-# Set ` + "`preseed: ./your-preseed.cfg`" + ` in fleet.yaml to make
-# this an unattended install. See examples/debian-preseed.cfg.
+# (boot=` + p.Boot + `). For unattended d-i, set ` + "`boot: debian-12`" + ` or
+# ` + "`boot: debian-13`" + ` in fleet.yaml — pxe-beacon then serves the
+# embedded default preseed, with user pxe / password pxe.
 `)
 	}
 
@@ -403,13 +427,17 @@ func (s *Server) handlePreseed(w http.ResponseWriter, r *http.Request) {
 // /meta-data endpoints — they already exist for Ubuntu, so we just
 // fetch them again post-install.
 func renderCloudInitBridge(vars map[string]any) []byte {
+	// PXE expert fix #4: pin datasource_list so cloud-init's first
+	// boot doesn't time out 120s probing Ec2/Azure/GCP before
+	// finding the NoCloud seed dir.
 	body := fmt.Sprintf(`
-### cloud-init bridge — appended by pxe-beacon when fleet.yaml had cloud_init:
+### cloud-init bridge — appended automatically by pxe-beacon (v0.5.0+).
 ### Runs on first boot of the installed system. Idempotent.
 d-i preseed/late_command string \
   in-target apt-get update ; \
   in-target apt-get install -y --no-install-recommends cloud-init wget ca-certificates ; \
   in-target mkdir -p /var/lib/cloud/seed/nocloud ; \
+  in-target sh -c 'echo "datasource_list: [NoCloud, None]" > /etc/cloud/cloud.cfg.d/90-pxe-beacon-nocloud.cfg' ; \
   in-target wget -q -O /var/lib/cloud/seed/nocloud/user-data http://%s:%d/autoinstall/%s/user-data ; \
   in-target wget -q -O /var/lib/cloud/seed/nocloud/meta-data http://%s:%d/autoinstall/%s/meta-data ; \
   in-target systemctl enable cloud-init.service cloud-config.service cloud-final.service cloud-init-local.service ;

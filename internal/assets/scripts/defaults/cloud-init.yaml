@@ -1,0 +1,25 @@
+#cloud-config
+# pxe-beacon EMBEDDED DEFAULT cloud-init user-data.
+#
+# Used when a fleet entry omits the `cloud_init:` field. Does
+# basically nothing on first boot except phone home to pxe-beacon so
+# the /status page shows installer-done. Override by providing your
+# own user-data via fleet.yaml's `cloud_init:` field.
+#
+# pxe-beacon Go-templates this. Vars: Name, MAC, MACHyp, AdvertisedIP, HTTPPort.
+
+hostname: {{.Name}}
+fqdn: {{.Name}}.local
+
+# Disable cloud-init's default behavior of locking the OS user — the
+# preseed already set up the `pxe` user with a password. Adjust as
+# needed in your own cloud_init: file.
+disable_root: false
+ssh_pwauth: true
+
+# Phone home so pxe-beacon's /status flips this machine to
+# installer-done. The retry loop covers boot-time DHCP flakiness.
+phone_home:
+  url: http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}/done
+  post: all
+  tries: 10

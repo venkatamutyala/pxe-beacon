@@ -130,7 +130,9 @@ machines:
 	}
 }
 
-func TestLoad_RejectsUbuntuWithoutCloudInit(t *testing.T) {
+func TestLoad_UbuntuWithoutCloudInit_OK_v050(t *testing.T) {
+	// v0.5.0: cloud_init is OPTIONAL for ubuntu-* — embedded default
+	// user-data is served when omitted. Previously this was an error.
 	dir := t.TempDir()
 	cfg := writeFile(t, dir, "fleet.yaml", `
 machines:
@@ -138,12 +140,16 @@ machines:
     name: kube-1
     boot: ubuntu-22.04
 `)
-	_, err := Load(cfg, newLog())
-	if err == nil {
-		t.Fatal("expected error: ubuntu-22.04 without cloud_init should fail validation")
+	f, err := Load(cfg, newLog())
+	if err != nil {
+		t.Fatalf("Load should succeed without cloud_init in v0.5.0: %v", err)
 	}
-	if !strings.Contains(err.Error(), "cloud_init") {
-		t.Errorf("error should mention cloud_init: %v", err)
+	p := f.Lookup("58:47:ca:70:c7:c9")
+	if p.Boot != "ubuntu-22.04" {
+		t.Errorf("Boot = %q, want ubuntu-22.04", p.Boot)
+	}
+	if p.CloudInit != "" {
+		t.Errorf("CloudInit should be empty (no field set), got %q", p.CloudInit)
 	}
 }
 

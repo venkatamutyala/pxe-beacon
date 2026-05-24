@@ -36,6 +36,14 @@ var ValidBootTargets = map[string]bool{
 	"custom":       true,
 }
 
+// Machine pairs a canonical MAC with its resolved Profile. Used
+// by callers (boot.RenderDispatch, the admin UI) that need to
+// enumerate the fleet.
+type Machine struct {
+	MAC     string
+	Profile Profile
+}
+
 // Profile is the resolved per-MAC boot configuration. It's what
 // callers get back from Fleet.Lookup. Plain values, no pointers — safe
 // to copy.
@@ -249,13 +257,13 @@ func validateProfile(p Profile, ctx string) error {
 			return fmt.Errorf("%s: ipxe_script %s: %w", ctx, p.IPXEScript, err)
 		}
 	case "ubuntu-22.04", "ubuntu-24.04":
-		// Ubuntu's Subiquity reads cloud-init / NoCloud natively.
-		if p.CloudInit == "" {
-			return fmt.Errorf("%s: boot=%s requires cloud_init (a user-data file with a credential / SSH key)",
-				ctx, p.Boot)
-		}
-		if _, err := os.Stat(p.CloudInit); err != nil {
-			return fmt.Errorf("%s: cloud_init %s: %w", ctx, p.CloudInit, err)
+		// v0.5.0: cloud_init is OPTIONAL — when omitted we serve
+		// the embedded default user-data (phone_home only). Still
+		// validate the file exists when set.
+		if p.CloudInit != "" {
+			if _, err := os.Stat(p.CloudInit); err != nil {
+				return fmt.Errorf("%s: cloud_init %s: %w", ctx, p.CloudInit, err)
+			}
 		}
 	case "debian-12", "debian-13":
 		// Debian's mainline d-i uses preseed.cfg, NOT cloud-init —
