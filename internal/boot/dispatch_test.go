@@ -59,17 +59,12 @@ machines:
 	for _, want := range []string{
 		// Dispatch line for the user's MAC.
 		"iseq ${net0/mac:hexhyp} 58-47-ca-70-c7-c9 && goto m_venkat-1",
-		// v0.5.8: explicit dhcp before probes, since iPXE doesn't
-		// inherit firmware DHCP state into its own stack on snponly.
-		"dhcp || echo DHCP_BEFORE_PROBES_FAILED",
-		"chain --autofree http://",
-		"/debug/probe/after-dhcp",
-		"chain --autofree tftp://",
-		"/probe/after-dhcp",
+		// v0.5.13: dhcp at top of script (not per arm). Cleaner +
+		// preserves any netmask widening from being overwritten.
+		"dhcp || goto top_fail_dhcp",
+		":top_fail_dhcp",
 		// Per-machine block label.
 		":m_venkat-1",
-		// dhcp inside the arm (PXE expert fix #1).
-		"dhcp ||",
 		// HTTP not HTTPS for d-i (PXE expert fix #2).
 		"http://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot/debian-installer/amd64/linux",
 		// preseed URL points back at pxe-beacon.

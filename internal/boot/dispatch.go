@@ -60,42 +60,25 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w := func(s string) { buf.WriteString(s); buf.WriteByte('\n') }
 
 	w("#!ipxe")
-	// v0.5.8: explicit dhcp BEFORE the probes. v0.5.7 put probes at
-	// the very top but neither HTTP nor TFTP probes hit pxe-beacon —
-	// strong signal that iPXE's TCP/IP stack has NO network state at
-	// script-start. The snponly UEFI build apparently doesn't carry
-	// the firmware DHCP lease into iPXE's own stack. iPXE-stage DHCP
-	// in the earlier logs was actually the matched arm's `dhcp`
-	// firing 5s into the script, AFTER the probes silently failed.
-	//
-	// Now: explicit dhcp at line 2, THEN probes. If probes hit after
-	// this dhcp, iPXE is running our script all along; the only
-	// missing piece is dhcp ordering.
-	addr := fmt.Sprintf("%s:%d", ctx.AdvertisedIP, ctx.HTTPPort)
-	w("dhcp || echo DHCP_BEFORE_PROBES_FAILED")
-	fmt.Fprintf(&buf, "chain --autofree tftp://%s/probe/after-dhcp ||\n", ctx.AdvertisedIP)
-	w("echo TFTP_PROBE_FAILED")
-	fmt.Fprintf(&buf, "chain --autofree http://%s/debug/probe/after-dhcp ||\n", addr)
-	w("echo HTTP_PROBE_FAILED")
-	w("")
 	w("# pxe-beacon dispatch — generated per request from fleet.yaml.")
 	w("# Each machine matches by MAC and kernel-boots its target OS")
 	w("# directly. No HTTP chain dependency.")
 	w("")
 	w("echo ==============================================")
-	w("echo pxe-beacon dispatch (v0.5.11)")
+	w("echo pxe-beacon dispatch (v0.5.13)")
 	w("echo   net0/mac       = ${net0/mac}")
 	w("echo   net0/mac:hxhyp = ${net0/mac:hexhyp}")
 	w("echo ==============================================")
 	w("")
-	// More detailed probes — these use variable substitution. If
-	// the top-of-script probes hit but these don't, the issue is
-	// variable expansion specifically (one of net0/net1/ip/gateway
-	// is parse-erroring).
-	fmt.Fprintf(&buf, "chain --autofree http://%s/debug/probe/net0/${net0/mac:hexhyp} ||\n", addr)
-	w("echo HTTP_NET0_FAILED")
-	fmt.Fprintf(&buf, "chain --autofree tftp://%s/probe/net0/${net0/mac:hexhyp} ||\n", ctx.AdvertisedIP)
-	w("echo TFTP_NET0_FAILED")
+	// v0.5.13: dhcp + optional netmask widening at the TOP of the
+	// script, BEFORE iseq dispatch and BEFORE any chain to pxe-beacon.
+	// All matched arms inherit the resulting network state — no need
+	// to dhcp again per-arm.
+	w("dhcp || goto top_fail_dhcp")
+	if ctx.ClientNetmask != "" {
+		fmt.Fprintf(&buf, "set net0/netmask %s\n", ctx.ClientNetmask)
+		fmt.Fprintf(&buf, "echo pxe-beacon: widened net0/netmask to %s for cross-subnet routing\n", ctx.ClientNetmask)
+	}
 	w("")
 
 	machines := []fleet.Machine{}
@@ -133,16 +116,15 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("# ----- default arm: machine not in fleet.yaml (or iseq did not match) -----")
 	w(":target_default")
 	w("echo pxe-beacon: NO MATCH for ${net0/mac:hexhyp} in fleet.yaml")
-	w("echo pxe-beacon: if you EXPECTED a match, check that fleet.yaml's mac matches ${mac:hexhyp} above")
+	w("echo pxe-beacon: if you EXPECTED a match, check that fleet.yaml's mac matches ${net0/mac:hexhyp} above")
 	w("sleep 8")
-	w("dhcp || goto target_default_fail_dhcp")
 	w("echo pxe-beacon: chaining https://boot.netboot.xyz/menu.ipxe ...")
 	w("chain --replace --autofree https://boot.netboot.xyz/menu.ipxe || goto target_default_fail_chain")
-	// Error blocks. chain success replaces iPXE (never returns), so
-	// fallthrough only happens on goto.
 	w("")
-	w(":target_default_fail_dhcp")
-	w("echo pxe-beacon: DHCP FAILED in default arm — rebooting in 30s")
+	// Top-level fail labels — reached if the top-of-script dhcp itself
+	// failed. Each machine block goto's its own labeled fail blocks.
+	w(":top_fail_dhcp")
+	w("echo pxe-beacon: TOP-LEVEL DHCP FAILED — no IP, cannot continue; rebooting in 30s")
 	w("sleep 30")
 	w("reboot")
 	w("")
@@ -183,18 +165,10 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	// after `cmd` SUCCEEDS too, putting the box in a reboot loop that
 	// never reaches the kernel.
 
-	// DHCP: needed for kernel/initrd HTTP fetch. (PXE expert fix #1.)
-	fmt.Fprintf(buf, "dhcp || goto %s_fail_dhcp\n", label)
-	// v0.5.11: optional netmask override for cross-subnet-L2-bridged
-	// topologies (e.g. Mac on Wi-Fi + PXE client on wired LAN behind
-	// the same router). DHCP gives a narrow /24 that doesn't include
-	// pxe-beacon's subnet; widening it makes iPXE use direct ARP/L2
-	// for pxe-beacon instead of going through a gateway that can't
-	// route between the two subnets.
-	if ctx.ClientNetmask != "" {
-		fmt.Fprintf(buf, "set net0/netmask %s\n", ctx.ClientNetmask)
-		fmt.Fprintf(buf, "echo pxe-beacon: widened net0/netmask to %s for cross-subnet routing\n", ctx.ClientNetmask)
-	}
+	// v0.5.13: dhcp + netmask widening are now done ONCE at the top
+	// of the script. Doing them again here would overwrite the
+	// widened netmask with the DHCP-supplied /24, breaking the
+	// cross-subnet fix.
 	w("imgfree")
 
 	switch m.Profile.Boot {
