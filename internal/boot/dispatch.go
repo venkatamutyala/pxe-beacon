@@ -61,30 +61,47 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 
 	w("#!ipxe")
 	w("# pxe-beacon dispatch — generated per request from fleet.yaml.")
-	w("# Each machine matches by MAC and kernel-boots its target OS")
-	w("# directly. No HTTP chain dependency.")
+	w("# v0.6.5: verbose, screen-debuggable. Every stage transition is")
+	w("# echoed with a ===== header, settings are dumped, and 2-second")
+	w("# sleeps separate sections so a human at the console can see")
+	w("# the boot story unfold.")
 	w("")
-	w("echo ==============================================")
-	w("echo pxe-beacon dispatch (v0.6.4)")
-	w("echo   net0/mac       = ${net0/mac}")
-	w("echo   net0/mac:hxhyp = ${net0/mac:hexhyp}")
-	w("echo ==============================================")
+	w("echo ============================================================")
+	w("echo  pxe-beacon dispatch (v0.6.5) — verbose mode")
+	w("echo ============================================================")
+	w("echo")
+	w("echo [stage 0/5] iPXE settings BEFORE dhcp")
+	w("echo   net0/mac        = ${net0/mac}")
+	w("echo   net0/mac:hexhyp = ${net0/mac:hexhyp}")
+	w("echo   ip              = ${ip}")
+	w("echo   netmask         = ${netmask}")
+	w("echo   gateway         = ${gateway}")
+	w("echo   dns             = ${dns}")
+	w("echo   platform        = ${platform}")
+	w("echo   buildarch       = ${buildarch}")
+	w("sleep 2")
 	w("")
-	// v0.6.1: the v0.5.16 30-second autoboot timing diagnostic is
-	// removed. v0.6.0 (vanilla iPXE) confirmed via timing that our
-	// script DOES run in autoboot context now — that 30s+1s delay
-	// before iPXE-stage DHCP was just the sleep, not iPXE init.
-	//
-	// v0.5.13: dhcp + optional netmask widening at the TOP of the
-	// script, BEFORE iseq dispatch and BEFORE any chain to pxe-beacon.
-	// All matched arms inherit the resulting network state — no need
-	// to dhcp again per-arm.
+	w("echo [stage 1/5] running dhcp...")
 	w("dhcp || goto top_fail_dhcp")
-	if ctx.ClientNetmask != "" {
-		fmt.Fprintf(&buf, "set net0/netmask %s\n", ctx.ClientNetmask)
-		fmt.Fprintf(&buf, "echo pxe-beacon: widened net0/netmask to %s for cross-subnet routing\n", ctx.ClientNetmask)
-	}
+	w("echo   dhcp ok. assigned:")
+	w("echo     ip      = ${ip}")
+	w("echo     netmask = ${netmask}")
+	w("echo     gateway = ${gateway}")
+	w("echo     dns     = ${dns}")
+	w("sleep 2")
 	w("")
+	if ctx.ClientNetmask != "" {
+		w("echo [stage 2/5] widening netmask for cross-subnet routing")
+		fmt.Fprintf(&buf, "echo   from %s -> %s\n", "${netmask}", ctx.ClientNetmask)
+		fmt.Fprintf(&buf, "set net0/netmask %s\n", ctx.ClientNetmask)
+		w("echo   net0/netmask now: ${netmask}")
+		w("sleep 2")
+		w("")
+	} else {
+		w("echo [stage 2/5] no -client-netmask flag set; using DHCP-supplied netmask")
+		w("sleep 1")
+		w("")
+	}
 
 	machines := []fleet.Machine{}
 	if f != nil {
@@ -104,14 +121,21 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	// succeeds, && goto jumps; if iseq fails, goto skipped, parser
 	// moves to next statement. Falls through to `goto target_default`
 	// at the bottom only when all iseqs failed.
+	w("echo [stage 3/5] per-MAC iseq dispatch")
+	w("echo   comparing ${net0/mac:hexhyp} against fleet.yaml entries...")
+	w("sleep 1")
+	w("")
 	w("# ----- per-MAC dispatch (one iseq per line; covers net0..net3) -----")
 	for _, m := range machines {
 		label := labelOf(m.MAC, m.Profile.Name)
 		hyp := strings.ReplaceAll(m.MAC, ":", "-")
+		fmt.Fprintf(&buf, "echo   trying %s (%s)...\n", m.Profile.Name, hyp)
 		for _, nic := range []string{"net0/mac:hexhyp", "net1/mac:hexhyp", "net2/mac:hexhyp", "net3/mac:hexhyp"} {
 			fmt.Fprintf(&buf, "iseq ${%s} %s && goto %s\n", nic, hyp, label)
 		}
 	}
+	w("echo   no iseq matched — falling through to target_default")
+	w("sleep 1")
 	w("goto target_default")
 	w("")
 
@@ -120,32 +144,43 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 		writeMachineBlock(&buf, m, ctx)
 	}
 
-	// Default arm — fall back to netboot.xyz embed. Reached when iseq
-	// did NOT match any fleet entry — emits a "NO MATCH" notice so
-	// operators can debug typos in fleet.yaml.
-	w("# ----- default arm: machine not in fleet.yaml (iseq did not match) -----")
+	// Default arm — fall back to netboot.xyz embed.
+	w("# ----- default arm: machine not in fleet.yaml -----")
 	w(":target_default")
-	w("echo pxe-beacon: NO MATCH for ${net0/mac:hexhyp} in fleet.yaml")
-	w("echo pxe-beacon: check that fleet.yaml's mac matches ${net0/mac:hexhyp} above")
+	w("echo")
+	w("echo ===== NO FLEET MATCH =====")
+	w("echo   ${net0/mac:hexhyp} is not in fleet.yaml")
+	w("echo   check fleet.yaml for a matching `mac:` entry")
+	w("echo   (compare against the value above — case + hyphens matter)")
+	w("echo   falling back to netboot.xyz menu in 8s")
 	w("sleep 8")
 	w("goto menu_netbootxyz")
 	w("")
-	// menu_netbootxyz — clean chain to netboot.xyz menu without the
-	// "NO MATCH" preamble. Reached when an operator deliberately
-	// picks "netboot.xyz menu" from a matched-arm boot menu (v0.6.2+).
+	w("# ----- :menu_netbootxyz — clean chain to netboot.xyz hosted menu -----")
 	w(":menu_netbootxyz")
-	w("echo pxe-beacon: chaining https://boot.netboot.xyz/menu.ipxe ...")
+	w("echo")
+	w("echo ===== CHAIN TO NETBOOT.XYZ =====")
+	w("echo   target: https://boot.netboot.xyz/menu.ipxe")
+	w("echo   (this REPLACES iPXE; you should see netboot.xyz's menu next)")
+	w("sleep 2")
 	w("chain --replace --autofree https://boot.netboot.xyz/menu.ipxe || goto menu_netbootxyz_fail")
 	w("")
-	// Top-level fail labels — reached if the top-of-script dhcp itself
-	// failed. Each machine block goto's its own labeled fail blocks.
+	// Fail blocks.
+	w("# ----- top-level fail blocks -----")
 	w(":top_fail_dhcp")
-	w("echo pxe-beacon: TOP-LEVEL DHCP FAILED — no IP, cannot continue; rebooting in 30s")
+	w("echo")
+	w("echo ===== TOP-LEVEL DHCP FAILED =====")
+	w("echo   iPXE could not get an IP from the DHCP server")
+	w("echo   nothing further is possible; rebooting in 30s")
 	w("sleep 30")
 	w("reboot")
 	w("")
 	w(":menu_netbootxyz_fail")
-	w("echo pxe-beacon: netboot.xyz CHAIN FAILED — check HTTPS reachability; rebooting in 30s")
+	w("echo")
+	w("echo ===== NETBOOT.XYZ CHAIN FAILED =====")
+	w("echo   HTTPS chain to boot.netboot.xyz failed")
+	w("echo   check outbound HTTPS reachability from this NIC")
+	w("echo   rebooting in 30s")
 	w("sleep 30")
 	w("reboot")
 
@@ -192,7 +227,12 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 
 	w("")
 	fmt.Fprintf(buf, ":%s\n", label)
-	fmt.Fprintf(buf, "echo pxe-beacon: %s (%s) -> %s\n", name, m.MAC, m.Profile.Boot)
+	w("echo")
+	fmt.Fprintf(buf, "echo ===== [stage 4/5] MATCHED ARM: %s =====\n", name)
+	fmt.Fprintf(buf, "echo   fleet target: %s\n", m.Profile.Boot)
+	fmt.Fprintf(buf, "echo   mac: %s\n", m.MAC)
+	w("sleep 2")
+	w("")
 
 	// v0.6.3: 30-second interactive boot menu. Default = fleet target
 	// (auto-selected for unattended boots). Operator at the console
@@ -227,7 +267,13 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	fmt.Fprintf(buf, "goto %s\n", label)
 	w("")
 	fmt.Fprintf(buf, ":%s_boot\n", label)
-	fmt.Fprintf(buf, "echo pxe-beacon: ===== booting fleet target: %s =====\n", m.Profile.Boot)
+	w("echo")
+	fmt.Fprintf(buf, "echo ===== [stage 5/5] BOOTING %s =====\n", m.Profile.Boot)
+	w("echo   ip      = ${ip}")
+	w("echo   netmask = ${netmask}")
+	w("echo   gateway = ${gateway}")
+	w("echo   dns     = ${dns}")
+	w("sleep 2")
 
 	// v0.5.13: dhcp + netmask widening are done ONCE at the top of
 	// the script. Doing them again here would overwrite the widened
@@ -323,27 +369,41 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 func writeMachineErrorBlocks(buf *bytes.Buffer, label, target, srcURL string) {
 	w := func(s string) { buf.WriteString(s); buf.WriteByte('\n') }
 	fmt.Fprintf(buf, "\n:%s_fail_dhcp\n", label)
-	w("echo pxe-beacon: DHCP FAILED — iPXE could not get an IP, cannot fetch kernel")
-	w("echo pxe-beacon: rebooting in 30s")
+	w("echo")
+	w("echo ===== DHCP FAILED =====")
+	fmt.Fprintf(buf, "echo   target: %s\n", target)
+	w("echo   iPXE could not get an IP from the DHCP server in the matched arm")
+	w("echo   nothing further is possible; rebooting in 30s")
 	w("sleep 30")
 	w("reboot")
 
 	fmt.Fprintf(buf, "\n:%s_fail_kernel\n", label)
-	fmt.Fprintf(buf, "echo pxe-beacon: KERNEL FETCH FAILED for %s\n", target)
-	fmt.Fprintf(buf, "echo pxe-beacon: could not reach %s/linux\n", srcURL)
-	w("echo pxe-beacon: verify DNS + outbound HTTP from this NIC; rebooting in 30s")
+	w("echo")
+	w("echo ===== KERNEL FETCH FAILED =====")
+	fmt.Fprintf(buf, "echo   target:    %s\n", target)
+	fmt.Fprintf(buf, "echo   tried URL: %s/linux\n", srcURL)
+	w("echo   verify DNS + outbound HTTP from this NIC reach the URL above")
+	w("echo   rebooting in 30s")
 	w("sleep 30")
 	w("reboot")
 
 	fmt.Fprintf(buf, "\n:%s_fail_initrd\n", label)
-	fmt.Fprintf(buf, "echo pxe-beacon: INITRD FETCH FAILED for %s — kernel loaded but initrd did not\n", target)
-	w("echo pxe-beacon: rebooting in 30s")
+	w("echo")
+	w("echo ===== INITRD FETCH FAILED =====")
+	fmt.Fprintf(buf, "echo   target:    %s\n", target)
+	fmt.Fprintf(buf, "echo   tried URL: %s/initrd.gz\n", srcURL)
+	w("echo   kernel loaded fine; initrd download failed")
+	w("echo   rebooting in 30s")
 	w("sleep 30")
 	w("reboot")
 
 	fmt.Fprintf(buf, "\n:%s_fail_boot\n", label)
-	fmt.Fprintf(buf, "echo pxe-beacon: BOOT FAILED for %s — kernel image rejected (cmdline / arch mismatch?)\n", target)
-	w("echo pxe-beacon: rebooting in 30s")
+	w("echo")
+	w("echo ===== BOOT FAILED =====")
+	fmt.Fprintf(buf, "echo   target: %s\n", target)
+	w("echo   kernel + initrd loaded but `boot` returned error")
+	w("echo   likely a kernel cmdline / arch mismatch")
+	w("echo   rebooting in 30s")
 	w("sleep 30")
 	w("reboot")
 }
