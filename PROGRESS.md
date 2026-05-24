@@ -614,6 +614,62 @@ End-to-end loopback smoke (in `debug.txt`-style commands during dev):
 
 ---
 
+## v0.2.1 — honest fix-up for the autoinstall templates
+
+Venkat ran v0.2.0 with `boot: debian-12` and the boot fell through to
+the netboot.xyz menu instead of installing. Investigation found two
+real defects in v0.2.0's autoinstall layer:
+
+1. **Wrong Debian mirror path.** The template had
+   `current/legacy-images/netboot/...`; bookworm uses
+   `current/images/netboot/...` (no "legacy-"). Every kernel-fetch
+   attempt 404'd → iPXE chain failed → netboot.xyz embed fallback.
+   **Fixed** in v0.2.1 — Debian d-i now boots from the corrected URL.
+
+2. **Standard Debian d-i doesn't honor cloud-init / NoCloud
+   parameters.** d-i uses preseed.cfg, not cloud-init. So even with
+   the corrected URL, the operator's `cloud_init:` file is silently
+   ignored and the installer goes interactive. Documented honestly
+   in `debian-12.ipxe`'s header comment; real preseed support is
+   v0.3 work.
+
+3. **Ubuntu 22.04 / 24.04 kernel URLs don't exist either.** I
+   guessed `http://boot.netboot.xyz/os/ubuntu/<ver>/casper/vmlinuz`
+   — that path 404s. Ubuntu doesn't publish casper-extracted files
+   as flat HTTP anywhere I can find quickly. **Marked broken in
+   v0.2.1**: the ubuntu-22.04 and ubuntu-24.04 templates now carry
+   a loud "STATUS: KERNEL URL TBD — not functional yet" comment.
+   Real fix needs either `pxe-beacon fetch <target>` (extract from
+   ISO into local cache) or imgargs-injection-through-netboot.xyz —
+   tracked for v0.2.2+.
+
+What v0.2.1 actually gives you:
+- **`boot: menu`** — works (unchanged from v0.1.3).
+- **`boot: debian-12`** — boot chain reaches d-i; user steps through
+  the d-i installer manually. NOT zero-touch yet.
+- **`boot: custom`** — works (user supplies their own iPXE script).
+- **`boot: ubuntu-22.04` / `ubuntu-24.04`** — *known broken*; the
+  template loudly says don't use it. Use `boot: custom` for now.
+
+Status / phone-home / fleet config / SIGHUP reload / /status page
+all work as advertised — those layers are unaffected by the
+autoinstall-template URL bugs.
+
+### Workaround for the user pending v0.2.2+
+
+`debug.txt` in the repo includes a `boot: custom` iPXE script that
+boots Debian d-i interactively from the correct URL. The user can
+drop it in fleet.yaml as `boot: custom` + `ipxe_script: ./that.ipxe`
+to at least confirm the chain works end-to-end on their hardware.
+
+### Lesson for next time
+
+Ship every URL through a `curl -I` check in CI before tagging. The
+template tests pass strings (which they did) but never resolve the
+URLs (which they should). Adding a TBD `make verify-urls` target.
+
+---
+
 ## v0.1.3 — serve `netboot.xyz-snponly.efi` for x86_64 UEFI
 
 The v0.1.2 user reported that PXE-booting an AMI/Phoenix-firmware

@@ -1,0 +1,49 @@
+#cloud-config
+# venkatamutyala — cloud-init user-data for pxe-beacon.
+#
+# Bootstraps opkssh (OpenPubkey SSH) so venkata@venkatamutyala.com can
+# log in as root (and as the `debian` cloud user if it exists) using a
+# Google-issued OIDC token — no static SSH keys to manage.
+#
+# pxe-beacon Go-templates this file at serve time. Available vars
+# (referenced below as Name / MAC / MACHyp / AdvertisedIP / HTTPPort):
+#   - Name          machine display name from fleet.yaml
+#   - MAC           canonical colon-MAC
+#   - MACHyp        hyphen-MAC (URL-safe form)
+#   - AdvertisedIP  pxe-beacon server IP
+#   - HTTPPort      pxe-beacon HTTP port
+# None are required — this file works as plain cloud-config.
+
+# 1. Ensure apt is fresh and required dependencies are installed before
+#    runcmd executes.
+package_update: true
+package_upgrade: false
+packages:
+  - curl
+  - ca-certificates
+
+runcmd:
+  # 2. Download and execute the official opkssh Linux installation script.
+  - [sh, -c, 'curl -fsSL "https://raw.githubusercontent.com/openpubkey/opkssh/main/scripts/install-linux.sh" | bash']
+
+  # 3. Authorize venkata@venkatamutyala.com to log in as root via Google.
+  - [/usr/local/bin/opkssh, add, root, venkata@venkatamutyala.com, google]
+
+  # 4. Also authorize the same identity for the `debian` cloud user, if
+  #    that account exists on this image. The `|| true` keeps cloud-init
+  #    from failing on images that don't ship a `debian` user.
+  - [sh, -c, 'id -u debian >/dev/null 2>&1 && /usr/local/bin/opkssh add debian venkata@venkatamutyala.com google || true']
+
+  # 5. Reload sshd so the new opkssh AuthorizedKeysCommand wiring takes
+  #    effect without dropping existing connections.
+  - [systemctl, reload, ssh]
+
+# 6. (Optional) Phone home when the install completes so pxe-beacon's
+#    /status page flips this machine to `installer-done`. Safe to
+#    enable on any pxe-beacon-served install — if pxe-beacon isn't
+#    reachable, cloud-init retries `tries` times and then moves on.
+#
+# phone_home:
+#   url: http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}/done
+#   post: all
+#   tries: 10

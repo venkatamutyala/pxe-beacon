@@ -1,21 +1,29 @@
 #!ipxe
-# pxe-beacon: target=debian-12 unattended install. Debian publishes
-# flat-file netboot kernel + initrd at deb.debian.org — no ISO
-# extraction needed. We boot the d-i (debian-installer) kernel and
-# pass auto + preseed URL pointing at our cloud-init user-data.
+# pxe-beacon: target=debian-12. Boots the official Debian
+# bookworm debian-installer (d-i) kernel + initrd from deb.debian.org.
 #
-# Note: Debian 12 (bookworm) primarily uses preseed, but the
-# debian-installer in 12+ accepts a cloud-init datasource as well.
-# We point at user-data — Debian's cloud-init aware installer reads
-# the same NoCloud format Ubuntu uses.
-echo pxe-beacon: {{.Name}} ({{.MAC}}) -> debian-12 autoinstall
+# *** v0.2.x STATUS: d-i boots, but goes INTERACTIVE. ***
+# Standard d-i uses preseed.cfg, not cloud-init/NoCloud, so the
+# cloud_init file from fleet.yaml is NOT honored by Debian's
+# installer today. Full unattended Debian needs preseed.cfg
+# support — see PROGRESS.md v0.2.1 notes. Track for v0.3.
+#
+# What works now: chain reaches d-i, you can navigate the
+# installer menus on the client. What doesn't: zero-touch
+# autoinstall from fleet.yaml.
+echo pxe-beacon: {{.Name}} ({{.MAC}}) -> Debian 12 (d-i interactive — see PROGRESS.md)
 
 set base http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}
-set mirror http://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/legacy-images/netboot/debian-installer/amd64
+# Debian publishes flat-file netboot kernel + initrd here. Path
+# convention: dists/<release>/main/installer-amd64/current/images/netboot/...
+# (Earlier d-i releases had "legacy-images/" in the path — bookworm
+# doesn't.) deb.debian.org redirects to a healthy mirror automatically.
+set mirror https://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot/debian-installer/amd64
 
 imgfree
+# The NoCloud kernel args are harmless on standard d-i (it ignores them)
+# and forward-compatible with v0.3's preseed/cloud-init bridge work.
 kernel --name linux ${mirror}/linux \
-  auto=true priority=critical \
   ip=dhcp \
   cloud-config-url=/dev/null \
   ds=nocloud-net\;s=${base}/ \

@@ -1,9 +1,17 @@
 #!ipxe
-# pxe-beacon: target=ubuntu-22.04 unattended autoinstall via Subiquity
-# + cloud-init. The kernel + initrd are pulled from Ubuntu's release
-# mirror at the URLs below — these are the casper/ files extracted
-# from the live-server ISO. If the mirror URLs change upstream, edit
-# this template; everything else stays the same.
+# pxe-beacon: target=ubuntu-22.04
+#
+# *** v0.2.x STATUS: KERNEL URL TBD — not functional yet. ***
+# Ubuntu doesn't publish casper/vmlinuz as flat HTTP files. The URLs
+# below are placeholders that 404. Real autoinstall needs either
+# (a) a `pxe-beacon fetch ubuntu-22.04` subcommand that extracts the
+# ISO into a local cache (v0.2.x roadmap), or (b) chaining through
+# netboot.xyz's per-distro recipe with imgargs injection. Tracking
+# in PROGRESS.md for v0.2.1+.
+#
+# Until fixed: don't use this target. Use `boot: menu` (interactive
+# netboot.xyz menu) or `boot: custom` with your own iPXE script
+# pointing at known-working kernel URLs.
 #
 # Vars rendered by Go text/template at request time:
 #   {{.Name}}          machine display name (from fleet.yaml)

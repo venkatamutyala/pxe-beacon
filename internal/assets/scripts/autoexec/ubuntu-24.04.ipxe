@@ -1,6 +1,7 @@
 #!ipxe
-# pxe-beacon: target=ubuntu-24.04 unattended autoinstall.
-# Mirror layout same as 22.04 — only the version path changes.
+# pxe-beacon: target=ubuntu-24.04
+# *** v0.2.x STATUS: KERNEL URL TBD — same situation as ubuntu-22.04. ***
+# See that template's header comment + PROGRESS.md v0.2.1 notes.
 echo pxe-beacon: {{.Name}} ({{.MAC}}) -> ubuntu-24.04 autoinstall
 
 set base http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}
