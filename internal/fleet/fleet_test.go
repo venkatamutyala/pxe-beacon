@@ -253,6 +253,43 @@ machines:
 	}
 }
 
+func TestLoad_StrictRejectsNameUnderDefaults(t *testing.T) {
+	// The exact mistake from the v0.4.1 user report: machine fields
+	// pasted under `defaults:` instead of a `machines:` list. Pre-v0.4.2
+	// this silently parsed with `name:` being dropped; v0.4.2 strict
+	// mode rejects it loudly.
+	dir := t.TempDir()
+	cfg := writeFile(t, dir, "fleet.yaml", `
+defaults:
+  name: db-primary
+  boot: debian-12
+`)
+	_, err := Load(cfg, newLog())
+	if err == nil {
+		t.Fatal("expected error: name: under defaults: should be rejected")
+	}
+	if !strings.Contains(err.Error(), "name") {
+		t.Errorf("error should mention the offending field: %v", err)
+	}
+	if !strings.Contains(err.Error(), "hint") {
+		t.Errorf("error should include the operator-friendly hint: %v", err)
+	}
+}
+
+func TestLoad_StrictRejectsUnknownTopLevel(t *testing.T) {
+	dir := t.TempDir()
+	cfg := writeFile(t, dir, "fleet.yaml", `
+defaults:
+  boot: menu
+machine:                                  # typo: missing 's'
+  - mac: 58:47:ca:70:c7:c9
+`)
+	_, err := Load(cfg, newLog())
+	if err == nil {
+		t.Fatal("expected error: 'machine' (typo) should be rejected at top level")
+	}
+}
+
 func TestEmpty_ReloadIsError(t *testing.T) {
 	f := Empty(newLog())
 	if err := f.Reload(); err == nil {

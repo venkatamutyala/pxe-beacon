@@ -9,6 +9,7 @@
 package fleet
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net"
@@ -147,8 +148,17 @@ func (f *Fleet) reload() error {
 		return fmt.Errorf("read %s: %w", f.path, err)
 	}
 	var cfg configFile
-	if err := yaml.Unmarshal(raw, &cfg); err != nil {
-		return fmt.Errorf("parse %s: %w", f.path, err)
+	// Strict mode: any field in the YAML that isn't on configFile /
+	// defaultsEntry / machineYAML produces an error. This is what
+	// catches the "I put name: under defaults:" mistake — defaults
+	// only has Boot/CloudInit/Preseed/IPXEScript, and silently
+	// dropping a `name:` field there used to leave fleet.yaml
+	// looking valid while doing nothing useful.
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil {
+		return fmt.Errorf("parse %s: %w\n(hint: did you put `name:` or `mac:` under `defaults:`? "+
+			"machines belong under a top-level `machines:` list — see fleet.example.yaml)", f.path, err)
 	}
 	baseDir, _ := filepath.Abs(filepath.Dir(f.path))
 
@@ -213,6 +223,18 @@ func (f *Fleet) reload() error {
 
 	f.log.Infof("fleet: loaded %d machines from %s (default boot=%s)",
 		len(machines), f.path, defProfile.Boot)
+
+	// Heuristic warning: if there are zero machines AND the defaults
+	// look like an autoinstall config (preseed or cloud_init pointed
+	// at side files), the operator probably intended to put those
+	// fields on a machine entry. Loud warning so this doesn't get
+	// missed when scrolling logs.
+	if len(machines) == 0 && (defProfile.CloudInit != "" || defProfile.Preseed != "" || defProfile.IPXEScript != "") {
+		f.log.Warnf("fleet: 0 machines loaded but defaults has autoinstall side-files set — did you forget the top-level `machines:` list? See fleet.example.yaml for the structure.")
+	} else if len(machines) == 0 {
+		f.log.Warnf("fleet: 0 machines loaded — every client will get the defaults profile (boot=%s)",
+			defProfile.Boot)
+	}
 	return nil
 }
 
