@@ -67,13 +67,10 @@ machines:
 		":m_venkat_1",
 		// HTTP not HTTPS for d-i (PXE expert fix #2).
 		"http://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot/debian-installer/amd64/linux",
-		// preseed URL points back at pxe-beacon.
-		"url=http://10.69.69.218:8080/autoinstall/58-47-ca-70-c7-c9/preseed.cfg",
-		// Console for headless boards (PXE expert fix #7). v0.6.9
-		// swapped order so tty0 is LAST (d-i renders on screen).
-		"console=ttyS0,115200n8 console=tty0",
-		// v0.6.12: BOOTIF tells kernel ipconfig which NIC to use.
-		"BOOTIF=01-${net0/mac:hexhyp}",
+		// v0.6.16: preseed/url= (explicit form, matches netboot.xyz).
+		"preseed/url=http://10.69.69.218:8080/autoinstall/58-47-ca-70-c7-c9/preseed.cfg",
+		// v0.6.16: pin mirror suite to match kernel/initrd directory.
+		"mirror/suite=bookworm",
 		// Narration with sleep before reboot (PXE expert fix #8;
 		// v0.5.3 uses goto-labeled error blocks ending in sleep+reboot).
 		"echo pxe-beacon:",

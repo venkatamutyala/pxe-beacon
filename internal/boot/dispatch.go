@@ -67,7 +67,7 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("# the boot story unfold.")
 	w("")
 	w("echo ============================================================")
-	w("echo  pxe-beacon dispatch (v0.6.15) — no kernel ip= (let d-i's netcfg handle network)")
+	w("echo  pxe-beacon dispatch (v0.6.16) — cmdline matches netboot.xyz (no BOOTIF/ip/console)")
 	w("echo ============================================================")
 	w("echo")
 	w("echo [stage 0/5] iPXE settings BEFORE dhcp")
@@ -213,58 +213,32 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	assetsBase := func(target string) string {
 		return fmt.Sprintf("http://%s:%d/assets/%s", ctx.AdvertisedIP, ctx.HTTPPort, target)
 	}
-	// v0.6.9: tty0 LAST. With Linux multi-console, dmesg goes to all
-	// consoles but the d-i UI (userspace stdout) goes only to the
-	// LAST one listed. Putting tty0 last means the screen shows d-i;
-	// boxes with serial cables also see everything via dmesg.
-	consoleArgs := "console=ttyS0,115200n8 console=tty0"
-	// v0.6.12: BOOTIF restored. User reported v0.6.10 with BOOTIF
-	// removed STILL had d-i in a respawn loop, AND inspection via
-	// the d-i shell on tty2 showed `ip route` empty, no interfaces
-	// up, kernel-detected `eno1` and `lo` but neither active. That
-	// means kernel ipconfig couldn't auto-pick eno1 vs the WiFi
-	// NIC (Mediatek MT7961, no firmware, no link). BOOTIF tells
-	// ipconfig "use the interface with this MAC" — same MAC PXE
-	// booted from, which is by construction the wired one.
+	// v0.6.16: strip kernel cmdline to mirror netboot.xyz exactly.
 	//
-	// DEBCONF_DEBUG stays removed (was a possible noise source).
-	bootifArg := "BOOTIF=01-${net0/mac:hexhyp}"
+	// User reported: "When I use netboot.xyz and select preseed url
+	// and then type in my preseed it works fine. Why is this any
+	// different? Isn't it the same approach?"
+	//
+	// Reading netboot.xyz's actual debian.ipxe.j2 source: their
+	// kernel cmdline for the preseed case is JUST
+	//   auto=true priority=critical preseed/url=URL mirror/suite=X
+	// with `${netcfg}` empty and `${kernel_params}` empty by default.
+	// No BOOTIF, no ip=, no console=, no DEBCONF_DEBUG. That's it.
+	//
+	// We've been adding all those flags based on PXE-expert review
+	// items #1-#9 from v0.5.0 planning, but every one of them was
+	// either unnecessary (BOOTIF — d-i's netcfg picks the right NIC
+	// without it) or actively harmful (ip=...:none kept klibc from
+	// bringing up the link). Netboot.xyz proves the minimal form
+	// works on this user's hardware.
+	//
+	// Keeping it minimal: just auto/priority/preseed-url, plus
+	// mirror/suite to pin the codename matching the kernel/initrd
+	// directory we fetched from.
+	ipArg := ""       // no ip= (netboot.xyz doesn't pass one)
+	consoleArgs := "" // no console= (netboot.xyz doesn't pass one)
+	bootifArg := ""   // no BOOTIF (netboot.xyz doesn't pass one)
 	debugArg := ""
-
-	// v0.6.0: when -client-netmask was used to widen iPXE's netmask
-	// for cross-/24 routing to pxe-beacon, we also need to pass the
-	// widened netmask through to the Linux kernel. d-i / Subiquity
-	// re-DHCP after kernel boot and would otherwise get the same
-	// broken /24 from the DHCP server, making /preseed.cfg fetch
-	// from pxe-beacon (off the /24) fail.
-	//
-	// Kernel `ip=` cmdline syntax per
-	// Documentation/admin-guide/nfs/nfsroot.rst:
-	//   ip=client-ip:server-ip:gw:netmask:hostname:device:autoconf
-	//
-	// We use iPXE variable substitution (${ip}, ${gateway}) so the
-	// values are the ones iPXE actually resolved at boot. autoconf
-	// is `none` (static), so the kernel doesn't re-DHCP and we keep
-	// the widened netmask.
-	// v0.6.15: drop the kernel `ip=` cmdline entirely. Let d-i's own
-	// netcfg do all network setup.
-	//
-	// History:
-	//   v0.6.0-v0.6.12: `ip=...:::none` static config. klibc-ipconfig
-	//     didn't act on it. Link stayed DOWN.
-	//   v0.6.13-v0.6.14: `ip=dhcp`. klibc-ipconfig DOES try DHCP but
-	//     evidently times out before the eno1 driver has negotiated
-	//     link. User reported "still doesn't bring up a link."
-	//   v0.6.15 (here): no `ip=` at all. d-i's netcfg runs AFTER
-	//     hw-detect (drivers loaded, link up), with its own dhclient
-	//     and proper timeouts. BOOTIF still tells netcfg which NIC
-	//     to use, so it picks eno1 instead of the WiFi adapter.
-	//
-	// Note: with no kernel-level network, the URL fetch for preseed
-	// happens via d-i's network stack (netcfg-already-ran). That's
-	// the normal Debian PXE install path — exactly what the user's
-	// known-good reference preseed assumes.
-	ipArg := ""
 	_ = ctx.ClientNetmask // late_command in preseed still uses this
 
 	w("")
@@ -334,12 +308,16 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 
 	switch m.Profile.Boot {
 	case "debian-12":
+		// v0.6.16: cmdline exactly mirrors netboot.xyz's preseed
+		// branch:  auto=true priority=critical preseed/url=URL mirror/suite=bookworm
+		// Optional extras (ipArg/bootifArg/consoleArgs/debugArg) are
+		// empty by default in v0.6.16 — they're kept as parameters in
+		// case we need to add them back for a specific board.
 		mirror := "http://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot/debian-installer/amd64"
-		fmt.Fprintf(buf, "echo pxe-beacon: ip=${ip} gw=${gateway} dns=${dns}\n")
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching Debian 12 d-i kernel: %s/linux\n", mirror)
 		fmt.Fprintf(buf,
-			"kernel --name linux %s/linux auto=true priority=critical %s %s %s url=%s %s --- || goto %s_fail_kernel\n",
-			mirror, ipArg, bootifArg, debugArg, preseedURL, consoleArgs, label)
+			"kernel --name linux %s/linux auto=true priority=critical preseed/url=%s mirror/suite=bookworm %s %s %s %s --- || goto %s_fail_kernel\n",
+			mirror, preseedURL, ipArg, bootifArg, debugArg, consoleArgs, label)
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching initrd: %s/initrd.gz\n", mirror)
 		fmt.Fprintf(buf, "initrd --name initrd.gz %s/initrd.gz || goto %s_fail_initrd\n", mirror, label)
 		w("echo pxe-beacon: handing control to d-i (boot)...")
@@ -348,11 +326,10 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 
 	case "debian-13":
 		mirror := "http://deb.debian.org/debian/dists/trixie/main/installer-amd64/current/images/netboot/debian-installer/amd64"
-		fmt.Fprintf(buf, "echo pxe-beacon: ip=${ip} gw=${gateway} dns=${dns}\n")
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching Debian 13 d-i kernel: %s/linux\n", mirror)
 		fmt.Fprintf(buf,
-			"kernel --name linux %s/linux auto=true priority=critical %s %s %s url=%s %s --- || goto %s_fail_kernel\n",
-			mirror, ipArg, bootifArg, debugArg, preseedURL, consoleArgs, label)
+			"kernel --name linux %s/linux auto=true priority=critical preseed/url=%s mirror/suite=trixie %s %s %s %s --- || goto %s_fail_kernel\n",
+			mirror, preseedURL, ipArg, bootifArg, debugArg, consoleArgs, label)
 		fmt.Fprintf(buf, "echo pxe-beacon: fetching initrd: %s/initrd.gz\n", mirror)
 		fmt.Fprintf(buf, "initrd --name initrd.gz %s/initrd.gz || goto %s_fail_initrd\n", mirror, label)
 		w("echo pxe-beacon: handing control to d-i (boot)...")
