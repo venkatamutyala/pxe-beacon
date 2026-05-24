@@ -67,7 +67,7 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("# the boot story unfold.")
 	w("")
 	w("echo ============================================================")
-	w("echo  pxe-beacon dispatch (v0.6.5) — verbose mode")
+	w("echo  pxe-beacon dispatch (v0.6.6) — verbose + server-side logging")
 	w("echo ============================================================")
 	w("echo")
 	w("echo [stage 0/5] iPXE settings BEFORE dhcp")
@@ -102,6 +102,14 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 		w("sleep 1")
 		w("")
 	}
+	// v0.6.6: phone home to pxe-beacon now that network is up. From
+	// here onward, every major stage transition gets a /debug/probe/
+	// chain so the boot story shows up in pxe-beacon's stdout — no
+	// more needing to read the iPXE console.
+	addr := fmt.Sprintf("%s:%d", ctx.AdvertisedIP, ctx.HTTPPort)
+	fmt.Fprintf(&buf, "echo [phone-home] chaining http://%s/debug/probe/stage/post-netmask\n", addr)
+	fmt.Fprintf(&buf, "chain --autofree http://%s/debug/probe/stage/post-netmask || echo   (phone-home failed; pxe-beacon may be unreachable)\n", addr)
+	w("")
 
 	machines := []fleet.Machine{}
 	if f != nil {
@@ -162,6 +170,8 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("echo ===== CHAIN TO NETBOOT.XYZ =====")
 	w("echo   target: https://boot.netboot.xyz/menu.ipxe")
 	w("echo   (this REPLACES iPXE; you should see netboot.xyz's menu next)")
+	// v0.6.6: phone-home that we're about to chain to netboot.xyz.
+	fmt.Fprintf(&buf, "chain --autofree http://%s/debug/probe/netbootxyz/chaining || echo   (phone-home failed)\n", addr)
 	w("sleep 2")
 	w("chain --replace --autofree https://boot.netboot.xyz/menu.ipxe || goto menu_netbootxyz_fail")
 	w("")
@@ -226,11 +236,14 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	}
 
 	w("")
+	addr := fmt.Sprintf("%s:%d", ctx.AdvertisedIP, ctx.HTTPPort)
 	fmt.Fprintf(buf, ":%s\n", label)
 	w("echo")
 	fmt.Fprintf(buf, "echo ===== [stage 4/5] MATCHED ARM: %s =====\n", name)
 	fmt.Fprintf(buf, "echo   fleet target: %s\n", m.Profile.Boot)
 	fmt.Fprintf(buf, "echo   mac: %s\n", m.MAC)
+	// v0.6.6: phone home that we entered matched arm.
+	fmt.Fprintf(buf, "chain --autofree http://%s/debug/probe/matched/%s || echo   (phone-home failed)\n", addr, name)
 	w("sleep 2")
 	w("")
 
@@ -258,6 +271,10 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	fmt.Fprintf(buf, "choose --timeout 30000 --default %s_boot %s_menu_choice ||\n", label, label)
 	fmt.Fprintf(buf, "echo pxe-beacon: choose returned error (Ctrl+C?), defaulting to boot fleet target\n")
 	fmt.Fprintf(buf, "echo pxe-beacon: ===== menu choice: ${%s_menu_choice} =====\n", label)
+	// v0.6.6: phone-home the menu choice — this is the smoking gun for
+	// "did the keypress register". Look for the line in pxe-beacon
+	// stdout: iPXE-state via HTTP from <client>: menu-choice=<value>
+	fmt.Fprintf(buf, "chain --autofree http://%s/debug/probe/menu-choice/${%s_menu_choice} || echo   (phone-home failed)\n", addr, label)
 	w("sleep 2")
 	fmt.Fprintf(buf, "goto ${%s_menu_choice}\n", label)
 	w("")
@@ -273,6 +290,8 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	w("echo   netmask = ${netmask}")
 	w("echo   gateway = ${gateway}")
 	w("echo   dns     = ${dns}")
+	// v0.6.6: phone-home that we reached the boot stage.
+	fmt.Fprintf(buf, "chain --autofree http://%s/debug/probe/booting/%s || echo   (phone-home failed)\n", addr, m.Profile.Boot)
 	w("sleep 2")
 
 	// v0.5.13: dhcp + netmask widening are done ONCE at the top of
