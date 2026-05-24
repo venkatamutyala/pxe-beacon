@@ -67,7 +67,7 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("# the boot story unfold.")
 	w("")
 	w("echo ============================================================")
-	w("echo  pxe-beacon dispatch (v0.6.11) — use explicit ${net0/...} for kernel ip= cmdline")
+	w("echo  pxe-beacon dispatch (v0.6.12) — BOOTIF restored (kernel picks the wired NIC)")
 	w("echo ============================================================")
 	w("echo")
 	w("echo [stage 0/5] iPXE settings BEFORE dhcp")
@@ -218,15 +218,18 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	// LAST one listed. Putting tty0 last means the screen shows d-i;
 	// boxes with serial cables also see everything via dmesg.
 	consoleArgs := "console=ttyS0,115200n8 console=tty0"
-	// v0.6.10: BOOTIF and DEBCONF_DEBUG removed. v0.6.9 added both;
-	// user reported d-i pid 396 looping ("exited. scheduling for
-	// restart") shortly after kernel boot. Most likely BOOTIF
-	// pointed d-i at an interface it couldn't bring up, or the very
-	// verbose debconf output flooded something. Back to a minimal
-	// cmdline — netcfg/choose_interface=auto in the preseed handles
-	// NIC selection without BOOTIF.
-	bootifArg := "" // intentionally empty in v0.6.10
-	debugArg := ""  // intentionally empty in v0.6.10
+	// v0.6.12: BOOTIF restored. User reported v0.6.10 with BOOTIF
+	// removed STILL had d-i in a respawn loop, AND inspection via
+	// the d-i shell on tty2 showed `ip route` empty, no interfaces
+	// up, kernel-detected `eno1` and `lo` but neither active. That
+	// means kernel ipconfig couldn't auto-pick eno1 vs the WiFi
+	// NIC (Mediatek MT7961, no firmware, no link). BOOTIF tells
+	// ipconfig "use the interface with this MAC" — same MAC PXE
+	// booted from, which is by construction the wired one.
+	//
+	// DEBCONF_DEBUG stays removed (was a possible noise source).
+	bootifArg := "BOOTIF=01-${net0/mac:hexhyp}"
+	debugArg := ""
 
 	// v0.6.0: when -client-netmask was used to widen iPXE's netmask
 	// for cross-/24 routing to pxe-beacon, we also need to pass the
