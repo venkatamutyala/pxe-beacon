@@ -67,7 +67,7 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("# the boot story unfold.")
 	w("")
 	w("echo ============================================================")
-	w("echo  pxe-beacon dispatch (v0.6.13) — ip=dhcp (kernel static config never brought eno1 up)")
+	w("echo  pxe-beacon dispatch (v0.6.14) — embedded preseed mirrors a known-good real-world preseed")
 	w("echo ============================================================")
 	w("echo")
 	w("echo [stage 0/5] iPXE settings BEFORE dhcp")
