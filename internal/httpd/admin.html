@@ -190,6 +190,10 @@ document.querySelectorAll('button[data-delete]').forEach(btn => {
   });
 });
 
+// The save form lives further down the page than this script, so defer
+// the listener attach until the DOM is parsed (otherwise getElementById
+// is null here and the form falls back to a native submit = page reload).
+document.addEventListener('DOMContentLoaded', () => {
 document.getElementById('save-machine').addEventListener('submit', async (e) => {
   e.preventDefault();
   const get = id => document.getElementById(id).value.trim();
@@ -231,6 +235,7 @@ document.getElementById('save-machine').addEventListener('submit', async (e) => 
   }
   if (res.ok) { location.reload(); return; }
   await apiErr(res, 'save');
+});
 });
 </script>
 
