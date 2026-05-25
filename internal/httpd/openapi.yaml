@@ -13,7 +13,7 @@ info:
 
     Errors use a structured envelope `{code, message, details?}`.
     Branch on `code` (stable); `message` prose may be reworded.
-  version: "0.9.1"
+  version: "0.11.0"
 servers:
   - url: http://localhost:8080
     description: loopback (default)
@@ -116,6 +116,11 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
     put:
       summary: Set desired boot intent (idempotent)
+      description: >
+        action=install boots the configured fleet target; action=rescue
+        boots SystemRescue (requires `pxe-beacon fetch systemrescue`;
+        access via params.rescue_root_password / params.ssh_authorized_key);
+        action=null cancels.
       requestBody:
         required: true
         content:
@@ -135,7 +140,6 @@ paths:
               schema: { $ref: "#/components/schemas/Intent" }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
-        "501": { $ref: "#/components/responses/Error" }
   /api/v1/machines/{mac}/events:
     parameters:
       - { name: mac, in: path, required: true, schema: { type: string } }
@@ -211,6 +215,7 @@ components:
         preseed: { type: string }
         kickstart: { type: string }
         cloud_init: { type: string }
+        rescue: { type: string, description: "custom SystemRescue sysrescuecfg YAML; embedded default used when empty" }
         ipxe_script: { type: string }
         params:
           type: object

@@ -109,6 +109,77 @@ machines:
 	}
 }
 
+func TestDispatch_RescueArm_OverridesConfiguredTarget(t *testing.T) {
+	// v0.11.0: a MAC with a rescue intent armed boots SystemRescue,
+	// not its configured fleet target (debian-12 here).
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fleet.yaml"), []byte(`
+machines:
+  - mac: 58:47:ca:70:c7:c9
+    name: venkat-1
+    boot: debian-12
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := fleet.Load(filepath.Join(dir, "fleet.yaml"), narrlog.New("test", narrlog.LevelDebug, nil))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	ctx := dispatchCtx()
+	ctx.RescueArmed = func(mac string) bool { return mac == "58:47:ca:70:c7:c9" }
+	s := string(RenderDispatch(f, ctx))
+
+	for _, want := range []string{
+		// SystemRescue kernel/initrd from the assets tree.
+		"http://10.69.69.218:8080/assets/systemrescue/sysresccd/boot/x86_64/vmlinuz",
+		"http://10.69.69.218:8080/assets/systemrescue/sysresccd/boot/x86_64/sysresccd.img",
+		// archiso fetches the squashfs itself from this base (trailing slash).
+		"archiso_http_srv=http://10.69.69.218:8080/assets/systemrescue/",
+		"archisobasedir=sysresccd",
+		// Per-MAC sysrescuecfg delivery.
+		"sysrescuecfg=http://10.69.69.218:8080/autoinstall/58-47-ca-70-c7-c9/sysrescue.yaml",
+		// Menu surfaces the rescue override.
+		"systemrescue (RESCUE)",
+		"goto m_venkat_1_fail_kernel",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("rescue dispatch missing %q:\n%s", want, s)
+		}
+	}
+	// The Debian d-i path must NOT be rendered when rescue is armed.
+	if strings.Contains(s, "preseed/url=") {
+		t.Errorf("rescue arm should not render the debian preseed boot:\n%s", s)
+	}
+}
+
+func TestDispatch_RescueNotArmed_BootsConfiguredTarget(t *testing.T) {
+	// Sanity: with RescueArmed returning false, the configured target
+	// (debian-12) still renders — rescue is opt-in per MAC.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fleet.yaml"), []byte(`
+machines:
+  - mac: 58:47:ca:70:c7:c9
+    name: venkat-1
+    boot: debian-12
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := fleet.Load(filepath.Join(dir, "fleet.yaml"), narrlog.New("test", narrlog.LevelDebug, nil))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	ctx := dispatchCtx()
+	ctx.RescueArmed = func(mac string) bool { return false }
+	s := string(RenderDispatch(f, ctx))
+	if !strings.Contains(s, "preseed/url=") {
+		t.Errorf("non-rescue arm should render the debian preseed boot:\n%s", s)
+	}
+	if strings.Contains(s, "archiso_http_srv") {
+		t.Errorf("non-rescue arm should not render SystemRescue:\n%s", s)
+	}
+}
+
 func TestDispatch_MixedFleet(t *testing.T) {
 	dir := t.TempDir()
 	// Build operator files referenced by the custom entry — fleet

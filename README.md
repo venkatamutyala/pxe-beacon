@@ -174,6 +174,10 @@ Built-in `boot:` values:
 | `debian-13`    | `preseed:` (+optional `cloud_init:`)   | —                                           | same as `debian-12` but Trixie's kernel/initrd                               |
 | `custom`       | `ipxe_script:`                         | —                                           | serve the operator-provided iPXE script verbatim (Go-templated)              |
 
+Plus a **rescue** target that isn't a `boot:` value — it's a runtime
+intent (`PUT /intent {"action":"rescue"}`) that boots SystemRescue on
+any machine after `pxe-beacon fetch systemrescue`. See [Rescue mode](#rescue-mode-v0110).
+
 **`pxe-beacon fetch <target>`** is a one-time-per-distro operator
 step. Ubuntu's Subiquity kernel + initrd + filesystem.squashfs only
 live inside the live-server ISO; fetch downloads the ISO (~1.5 GB),
@@ -369,9 +373,41 @@ Terraform / Ansible / React Query map cleanly to it. Unknown MACs
 netboot.xyz fallback, so booting a random box doesn't require any
 prior queueing.
 
-**Note:** rescue is not yet wired — `PUT /intent {"action":"rescue"}`
-returns **501 Not Implemented** as of v0.8.1, and does not mutate the
-pending store. The real SystemRescue boot target lands in v0.8.2.
+#### Rescue mode (v0.11.0+)
+
+`PUT /intent {"action":"rescue"}` boots **SystemRescue** instead of the
+machine's configured `boot:` target — a per-MAC, one-shot rescue
+environment (think Hetzner Robot's rescue toggle). It uses the same
+pending/TTL/auto-expiry mechanics as `install`.
+
+One-time setup downloads SystemRescue into `-data-dir` (it's served over
+HTTP at boot, so don't hot-fetch from a flaky CDN mid-boot):
+
+```bash
+pxe-beacon fetch systemrescue
+```
+
+Then arm a machine:
+
+```bash
+curl -X PUT http://127.0.0.1:8080/api/v1/machines/58:47:ca:70:c7:c9/intent \
+  -H 'content-type: application/json' -d '{"action":"rescue"}'
+```
+
+**Access** to the booted rescue environment comes from `params:` (the
+same per-machine map used for installs):
+
+- `ssh_authorized_key` — injected into the live root account; sshd is
+  started. Headless SSH-in.
+- `rescue_root_password` — console / SSH root password. Defaults to
+  `pxe` (trusted-LAN only — change it).
+
+SystemRescue is Arch/archiso, **not** a cloud-init system, so this
+reuses the cloud-init *delivery pattern*, not cloud-init: pxe-beacon
+serves a per-MAC `sysrescuecfg` YAML at `/autoinstall/{mac}/sysrescue.yaml`
+(SSH-key injection rides an `autorun` setup script, since the YAML runs
+external scripts rather than inline). For a fully custom config, point a
+`rescue:` field at your own sysrescuecfg YAML (parallel to `cloud_init:`).
 
 **Already-installed guard (v0.8.1+):** once a machine reaches
 `installer-done` via cloud-init phone-home, pxe-beacon will no longer
@@ -414,7 +450,6 @@ Codes shipped in v0.9.0:
 | `body_invalid` | 400 | request body couldn't be parsed as JSON |
 | `action_missing` | 400 | body is JSON but the `action` key isn't present |
 | `action_invalid` | 400 | `action` value isn't `install`, `rescue`, or `null` |
-| `rescue_unimplemented` | 501 | rescue boot target not yet wired (tracked for v0.8.2) |
 | `pending_failed` | 500 | internal error in the pending store |
 | `paging_invalid` | 400 | `?limit=` / `?offset=` not a non-negative integer |
 

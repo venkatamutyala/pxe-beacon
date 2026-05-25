@@ -48,18 +48,41 @@ includes sorted params; settable via fleet.yaml / API / admin form)
 and the multi-arch container image (GHCR, non-root + setcap,
 `VOLUME /var/lib/pxe-beacon`, `--network host` + `--cap-add` documented).
 
-## Next: "Rescue + secure callbacks" (features)
+## v0.11.0 — "Rescue" ✅ SHIPPED
 
-**Theme:** Real rescue + authenticate the phone-home callback.
-**Estimate:** ~1.5 weeks.
+**Shipped:** SystemRescue as a real rescue boot target. `pxe-beacon
+fetch systemrescue` downloads + extracts the ISO preserving its native
+archiso tree (`sysresccd/...`); the per-MAC dispatch arm boots it when a
+rescue intent is queued (`PUT /intent {"action":"rescue"}` — un-501'd),
+regardless of the machine's configured `boot:` target. Served via a
+wildcard `/assets/{target}/{file...}` route because archiso constructs
+the squashfs URL itself (`archiso_http_srv` + `archisobasedir` →
+`/assets/systemrescue/sysresccd/x86_64/airootfs.sfs`).
+
+Access reuses the cloud-init *delivery pattern* (not cloud-init itself —
+SystemRescue is Arch/archiso): a per-MAC `sysrescuecfg` YAML at
+`/autoinstall/{mac}/sysrescue.yaml`, templated from `params`. SSH key
+(`params.ssh_authorized_key`) rides an `autorun` setup script (SystemRescue
+YAML runs external scripts, not inline); root password
+(`params.rescue_root_password`, defaults to `pxe`) is the one native key.
+Custom config via the optional `rescue:` profile field (parallel to
+`cloud_init:`).
+
+**Decision:** rescue is **per-MAC** via the existing intent API (not a
+global arm) — consistent with everything else and reuses the whole
+pending/dispatch path.
+
+## Next: "Secure callbacks" (features)
+
+**Theme:** Authenticate the phone-home callback + capture install logs.
+**Estimate:** ~1 week.
 
 ### Items
 
 | # | Item | Why | Effort |
 |---|---|---|---|
-| 1 | **Real SystemRescue rescue boot target** in `dispatch.go` + un-501 the API | One global arm (rescue isn't per-machine). Fetch SystemRescue into `-data-dir` via a new `pxe-beacon fetch systemrescue` target (don't hot-fetch — flaky CDN); serve via `/assets/systemrescue/`. Access via SystemRescue's native autoconfig YAML (root pw / SSH key / sshd), generated per-machine the same way cloud-init is — SystemRescue isn't a cloud-init system, but the delivery pattern is reused. SSH key can come from `params:`. | medium |
-| 2 | **Bootstrap tokens for the phone-home callback** (`/events` + `/done` alias) | Signed token carrying its own timestamp (HMAC-SHA256 over mac+timestamp, server secret from `$PXE_BEACON_TOKEN_SECRET` with logged random fallback). Templated into cloud-init via the callback URL. Constant-time compare; mismatch → 403, no state change. Today the callback is unauthenticated. | medium |
-| 3 | **`POST /autoinstall/{mac}/log` capture endpoint** | DC's missing-diagnostic gap. Cloud-init `runcmd` posts kernel ring buffer + cloud-init logs on success AND on `errors:` hook. In-memory ring per MAC, viewable via `/api/v1/machines/{mac}/logs` (last ~64KB). Auth: the same bootstrap token as #2. | small |
+| 1 | **Bootstrap tokens for the phone-home callback** (`/events` + `/done` alias) | Signed token carrying its own timestamp (HMAC-SHA256 over mac+timestamp, server secret from `$PXE_BEACON_TOKEN_SECRET` with logged random fallback). Templated into cloud-init via the callback URL. Constant-time compare; mismatch → 403, no state change. Today the callback is unauthenticated. | medium |
+| 2 | **`POST /autoinstall/{mac}/log` capture endpoint** | DC's missing-diagnostic gap. Cloud-init `runcmd` posts kernel ring buffer + cloud-init logs on success AND on `errors:` hook. In-memory ring per MAC, viewable via `/api/v1/machines/{mac}/logs` (last ~64KB). Auth: the same bootstrap token as #1. | small |
 
 ### Out of scope
 

@@ -98,18 +98,24 @@ func TestAPI_SetIntent_Install(t *testing.T) {
 	}
 }
 
-func TestAPI_SetIntent_Rescue_Returns501(t *testing.T) {
-	// v0.8.1: rescue boot target not yet wired (v0.8.2). API must
-	// 501 and NOT touch the pending store.
+func TestAPI_SetIntent_Rescue_Queues(t *testing.T) {
+	// v0.11.0: rescue is wired (SystemRescue). API must 200 and queue
+	// a rescue intent in the pending store.
 	srv, pSt, _ := newAPIServer(t)
 	mac := "58:47:ca:70:c7:c9"
 
 	w := doLoopback(srv, "PUT", "/api/v1/machines/"+mac+"/intent", `{"action":"rescue"}`)
-	if w.Code != http.StatusNotImplemented {
-		t.Fatalf("PUT rescue: want 501, got %d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT rescue: want 200, got %d body=%s", w.Code, w.Body.String())
 	}
-	if pSt.IsPending(mac) {
-		t.Fatal("rescue 501 must NOT queue an intent")
+	var view pxebeacon.Intent
+	decode(t, w, &view)
+	if view.Desired.Action != "rescue" {
+		t.Fatalf("want desired.action=rescue, got %+v", view)
+	}
+	action, _, _, ok := pSt.Status(mac)
+	if !ok || action != pending.ActionRescue {
+		t.Fatalf("Store should hold a rescue intent; got action=%q ok=%v", action, ok)
 	}
 }
 
@@ -194,7 +200,6 @@ func TestAPI_ErrorCodes(t *testing.T) {
 		{"action_invalid", "PUT", "/api/v1/machines/" + mac + "/intent", `{"action":"frobnicate"}`, 400, pxebeacon.ErrCodeActionInvalid},
 		{"action_wrong_type", "PUT", "/api/v1/machines/" + mac + "/intent", `{"action":42}`, 400, pxebeacon.ErrCodeActionInvalid},
 		{"body_invalid", "PUT", "/api/v1/machines/" + mac + "/intent", `not json`, 400, pxebeacon.ErrCodeBodyInvalid},
-		{"rescue_unimplemented", "PUT", "/api/v1/machines/" + mac + "/intent", `{"action":"rescue"}`, 501, pxebeacon.ErrCodeRescueUnimplemented},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

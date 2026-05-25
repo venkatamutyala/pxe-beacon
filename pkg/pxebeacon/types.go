@@ -61,6 +61,7 @@ type MachineConfig struct {
 	Preseed    string            `json:"preseed,omitempty"`
 	Kickstart  string            `json:"kickstart,omitempty"`
 	CloudInit  string            `json:"cloud_init,omitempty"`
+	Rescue     string            `json:"rescue,omitempty"`
 	IPXEScript string            `json:"ipxe_script,omitempty"`
 	Params     map[string]string `json:"params,omitempty"`
 }
@@ -126,7 +127,6 @@ const (
 	ErrCodeBodyInvalid          ErrCode = "body_invalid"
 	ErrCodeActionMissing        ErrCode = "action_missing"
 	ErrCodeActionInvalid        ErrCode = "action_invalid"
-	ErrCodeRescueUnimplemented  ErrCode = "rescue_unimplemented"
 	ErrCodePendingFailed        ErrCode = "pending_failed"
 	ErrCodePagingInvalid        ErrCode = "paging_invalid"
 	ErrCodeContentType          ErrCode = "content_type_unsupported"

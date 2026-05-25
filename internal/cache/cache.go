@@ -28,14 +28,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
-
-// AssetFiles names the files we extract per Ubuntu target.
-// Subiquity needs all three: vmlinuz (boot kernel), initrd (initramfs
-// with casper), filesystem.squashfs (root filesystem casper mounts).
-var AssetFiles = []string{"vmlinuz", "initrd", "filesystem.squashfs"}
 
 // TargetSpec describes how to fetch one target.
 type TargetSpec struct {
@@ -43,9 +39,25 @@ type TargetSpec struct {
 	Name string
 	// ISOURL is the upstream live-server ISO URL.
 	ISOURL string
-	// ISOPath maps the AssetFiles names → their location inside the
-	// ISO. Ubuntu live-server lays them under /casper/.
+	// ISOPath maps each destination path (relative to the target dir,
+	// '/'-separated, may be nested) → the file's absolute path inside
+	// the ISO. Ubuntu live-server lays assets flat under the target
+	// dir (vmlinuz, initrd, filesystem.squashfs). SystemRescue
+	// preserves its native archiso tree (sysresccd/x86_64/airootfs.sfs)
+	// because the boot firmware constructs that URL itself from
+	// archiso_http_srv + archisobasedir — we don't get to rename it.
 	ISOPath map[string]string
+}
+
+// Dests returns the destination paths this spec extracts, sorted for
+// deterministic iteration (download/extract order, manifest listing).
+func (s TargetSpec) Dests() []string {
+	out := make([]string, 0, len(s.ISOPath))
+	for d := range s.ISOPath {
+		out = append(out, d)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Targets is the registry of supported fetch targets.
@@ -66,6 +78,23 @@ var Targets = map[string]TargetSpec{
 			"vmlinuz":             "/casper/vmlinuz",
 			"initrd":              "/casper/initrd",
 			"filesystem.squashfs": "/casper/ubuntu-server-minimal.squashfs",
+		},
+	},
+	// SystemRescue (Arch/archiso) for the rescue boot target. Unlike
+	// the casper distros, archiso fetches the squashfs itself at
+	// ${archiso_http_srv}${archisobasedir}/x86_64/airootfs.sfs, so we
+	// MUST preserve the native paths — the dest keys mirror the ISO
+	// layout exactly and are served verbatim under /assets/systemrescue/.
+	// No airootfs.sha512 / `checksum` cmdline: keeps the asset set to
+	// the three files we can rely on, and integrity over a trusted LAN
+	// rescue boot isn't load-bearing.
+	"systemrescue": {
+		Name:   "systemrescue",
+		ISOURL: "https://fastly-cdn.system-rescue.org/releases/13.00/systemrescue-13.00-amd64.iso",
+		ISOPath: map[string]string{
+			"sysresccd/boot/x86_64/vmlinuz":       "/sysresccd/boot/x86_64/vmlinuz",
+			"sysresccd/boot/x86_64/sysresccd.img": "/sysresccd/boot/x86_64/sysresccd.img",
+			"sysresccd/x86_64/airootfs.sfs":       "/sysresccd/x86_64/airootfs.sfs",
 		},
 	},
 }
@@ -119,27 +148,33 @@ func (c *Cache) TargetDir(target string) (string, error) {
 }
 
 // AssetPath returns the absolute path to a target's asset file
-// (without checking it exists). Returns "" + error on invalid input.
+// (without checking it exists). The file may be a nested, '/'-separated
+// path (e.g. sysresccd/x86_64/airootfs.sfs); every segment is validated
+// to reject path traversal. Returns "" + error on invalid input.
 func (c *Cache) AssetPath(target, file string) (string, error) {
 	if !safeTargetName(target) {
 		return "", fmt.Errorf("invalid target name %q", target)
 	}
-	if !safeAssetName(file) {
+	if !safeAssetPath(file) {
 		return "", fmt.Errorf("invalid asset name %q", file)
 	}
-	return filepath.Join(c.Root, target, file), nil
+	return filepath.Join(c.Root, target, filepath.FromSlash(file)), nil
 }
 
-// IsPopulated reports whether a target has all expected files plus a
-// valid manifest. Returns (true, manifest) if so.
+// IsPopulated reports whether a target has all expected files (per its
+// TargetSpec) plus a valid manifest. Returns (true, manifest) if so.
 func (c *Cache) IsPopulated(target string) (bool, *Manifest) {
+	spec, ok := Targets[target]
+	if !ok {
+		return false, nil
+	}
 	tdir := filepath.Join(c.Root, target)
 	m, err := readManifest(tdir)
 	if err != nil {
 		return false, nil
 	}
-	for _, name := range AssetFiles {
-		fi, err := os.Stat(filepath.Join(tdir, name))
+	for _, dest := range spec.Dests() {
+		fi, err := os.Stat(filepath.Join(tdir, filepath.FromSlash(dest)))
 		if err != nil || fi.Size() == 0 {
 			return false, nil
 		}
@@ -176,9 +211,9 @@ func readManifest(dir string) (*Manifest, error) {
 	return &m, nil
 }
 
-// safeTargetName + safeAssetName reject anything path-traversal-y.
-// Only allow alphanumerics, dashes, dots, underscores; no slashes,
-// no leading dot.
+// safeTargetName rejects anything path-traversal-y. Only allow
+// alphanumerics, dashes, dots, underscores; no slashes, no leading dot.
+// safeAssetPath validates each segment of a nested asset path with it.
 func safeTargetName(s string) bool {
 	if s == "" || strings.HasPrefix(s, ".") {
 		return false
@@ -191,7 +226,21 @@ func safeTargetName(s string) bool {
 	return true
 }
 
-func safeAssetName(s string) bool { return safeTargetName(s) }
+// safeAssetPath validates a '/'-separated relative asset path. Each
+// segment must pass safeTargetName (which rejects "..", leading dots,
+// and embedded slashes), so the joined result can't escape the target
+// dir. Rejects absolute paths and empty input.
+func safeAssetPath(s string) bool {
+	if s == "" || strings.HasPrefix(s, "/") {
+		return false
+	}
+	for _, seg := range strings.Split(s, "/") {
+		if !safeTargetName(seg) {
+			return false
+		}
+	}
+	return true
+}
 
 // SHA256File returns the hex SHA-256 of a file. Used by the
 // manifest so re-runs can detect tampering / corruption.

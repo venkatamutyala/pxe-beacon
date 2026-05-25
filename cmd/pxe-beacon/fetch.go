@@ -94,7 +94,7 @@ func runFetch(args []string) {
 	}
 
 	fmt.Println("fetch: extracted:")
-	for _, name := range cache.AssetFiles {
+	for _, name := range spec.Dests() {
 		a := m.Files[name]
 		fmt.Printf("  %s/%s   %8s   sha256=%s…\n",
 			target, name, humanSize(a.Size), a.SHA256[:12])
@@ -103,7 +103,12 @@ func runFetch(args []string) {
 	fmt.Println()
 	fmt.Println("Next steps:")
 	fmt.Printf("  pxe-beacon -config /etc/pxe-beacon/fleet.yaml -data-dir %s\n", c.Root)
-	fmt.Println("  (fleet.yaml entry with boot: " + target + " + cloud_init: ./your.yaml)")
+	if target == "systemrescue" {
+		// SystemRescue is a rescue intent, not a fleet boot target.
+		fmt.Println("  (then PUT /api/v1/machines/{mac}/intent {\"action\":\"rescue\"} to boot it)")
+	} else {
+		fmt.Println("  (fleet.yaml entry with boot: " + target + " + cloud_init: ./your.yaml)")
+	}
 }
 
 func sortedTargets() []string {

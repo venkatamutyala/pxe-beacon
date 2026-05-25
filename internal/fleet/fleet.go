@@ -76,6 +76,14 @@ type Profile struct {
 	// config on first boot. Empty for non-RHEL targets.
 	Kickstart string
 
+	// Rescue is an absolute path to a custom SystemRescue
+	// `sysrescuecfg` YAML, served when a rescue intent is queued
+	// (PUT /intent {"action":"rescue"}). Independent of Boot — rescue
+	// is a runtime intent, not a fleet boot target. Empty → the
+	// embedded default sysrescue.yaml (root pw / SSH key from params)
+	// is templated instead. v0.11.0+.
+	Rescue string
+
 	// IPXEScript is an absolute path to the raw iPXE script the
 	// operator wants served verbatim. Only meaningful when
 	// boot==custom; empty otherwise.
@@ -105,6 +113,7 @@ type defaultsEntry struct {
 	CloudInit  string            `yaml:"cloud_init"`
 	Preseed    string            `yaml:"preseed"`
 	Kickstart  string            `yaml:"kickstart"`
+	Rescue     string            `yaml:"rescue"`
 	IPXEScript string            `yaml:"ipxe_script"`
 	Params     map[string]string `yaml:"params"`
 }
@@ -116,6 +125,7 @@ type machineYAML struct {
 	CloudInit  string            `yaml:"cloud_init"`
 	Preseed    string            `yaml:"preseed"`
 	Kickstart  string            `yaml:"kickstart"`
+	Rescue     string            `yaml:"rescue"`
 	IPXEScript string            `yaml:"ipxe_script"`
 	Params     map[string]string `yaml:"params"`
 }
@@ -218,6 +228,7 @@ func (f *Fleet) reload() error {
 		CloudInit:  resolvePath(baseDir, cfg.Defaults.CloudInit),
 		Preseed:    resolvePath(baseDir, cfg.Defaults.Preseed),
 		Kickstart:  resolvePath(baseDir, cfg.Defaults.Kickstart),
+		Rescue:     resolvePath(baseDir, cfg.Defaults.Rescue),
 		IPXEScript: resolvePath(baseDir, cfg.Defaults.IPXEScript),
 		Params:     mergeParams(nil, cfg.Defaults.Params),
 		IsDefault:  true,
@@ -252,6 +263,7 @@ func (f *Fleet) reload() error {
 			CloudInit:  resolvePath(baseDir, m.CloudInit),
 			Preseed:    resolvePath(baseDir, m.Preseed),
 			Kickstart:  resolvePath(baseDir, m.Kickstart),
+			Rescue:     resolvePath(baseDir, m.Rescue),
 			IPXEScript: resolvePath(baseDir, m.IPXEScript),
 			// Store the machine's OWN params here (a copy). The merge
 			// with defaults happens in Lookup at read time, so Save()
@@ -347,6 +359,15 @@ func validateProfile(p Profile, ctx string) error {
 		}
 	case "menu":
 		// No required side-files.
+	}
+	// Rescue is orthogonal to the boot target — any machine can be
+	// sent into SystemRescue via a rescue intent. The custom
+	// sysrescuecfg is optional (embedded default used otherwise) but
+	// must exist when set.
+	if p.Rescue != "" {
+		if _, err := os.Stat(p.Rescue); err != nil {
+			return fmt.Errorf("%s: rescue %s: %w", ctx, p.Rescue, err)
+		}
 	}
 	return nil
 }

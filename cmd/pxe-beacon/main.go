@@ -170,6 +170,13 @@ func main() {
 				AdvertisedIP:  advIP.String(),
 				HTTPPort:      *flagHTTPPort,
 				ClientNetmask: *flagClientNetmask,
+				// v0.11.0: a queued rescue intent makes the per-MAC
+				// dispatch arm boot SystemRescue instead of the
+				// configured fleet target.
+				RescueArmed: func(mac string) bool {
+					a, _, _, ok := pendSt.Status(mac)
+					return ok && a == pending.ActionRescue
+				},
 			}
 			autoexecFn = func() []byte {
 				return boot.RenderDispatch(fl, dctx)

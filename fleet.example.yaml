@@ -16,6 +16,10 @@ defaults:
   params:
     domain: lab.local
     dns: "10.69.0.1"
+    # Rescue access (used by SystemRescue when you PUT a rescue intent —
+    # see the rescue notes below). Fleet-wide here; override per-machine.
+    ssh_authorized_key: "ssh-ed25519 AAAA... ops@laptop"
+    # rescue_root_password: "change-me"   # defaults to "pxe" if unset
 
 machines:
   # Two near-identical Debian workers that differ only by hostname +
@@ -51,3 +55,17 @@ machines:
   - mac: "11:22:33:44:55:66"
     name: jumpbox
     boot: menu
+
+# Rescue (v0.11.0): any machine can be booted into SystemRescue,
+# regardless of its `boot:` target, by queuing a rescue intent:
+#
+#   pxe-beacon fetch systemrescue          # one-time; downloads + extracts
+#   curl -X PUT -H 'content-type: application/json' \
+#        -d '{"action":"rescue"}' \
+#        http://localhost:8080/api/v1/machines/58:47:ca:70:c7:c9/intent
+#
+# Access uses the params above: ssh_authorized_key is injected into the
+# live rescue root account (sshd is started) and rescue_root_password
+# sets the console/SSH root password (defaults to "pxe"). For a fully
+# custom SystemRescue config, point `rescue:` at your own sysrescuecfg
+# YAML (same place you'd put `cloud_init:`).

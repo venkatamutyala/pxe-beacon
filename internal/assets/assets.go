@@ -22,6 +22,8 @@ import (
 //go:embed scripts/defaults/debian-preseed.cfg
 //go:embed scripts/defaults/rhel-kickstart.cfg
 //go:embed scripts/defaults/cloud-init.yaml
+//go:embed scripts/defaults/sysrescue.yaml
+//go:embed scripts/defaults/sysrescue-setup.sh
 var fsys embed.FS
 
 // FS returns the embedded filesystem rooted at the package's
@@ -168,6 +170,8 @@ func ListEditableTemplates() []string {
 	return []string{
 		"defaults/debian-preseed.cfg",
 		"defaults/cloud-init.yaml",
+		"defaults/sysrescue.yaml",
+		"defaults/sysrescue-setup.sh",
 		"autoexec/menu.ipxe",
 		"autoexec/ubuntu-22.04.ipxe",
 		"autoexec/ubuntu-24.04.ipxe",

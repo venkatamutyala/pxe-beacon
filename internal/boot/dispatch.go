@@ -23,6 +23,12 @@ type DispatchContext struct {
 	// as local and use direct ARP/L2 instead of going through the
 	// gateway. v0.5.11+.
 	ClientNetmask string
+
+	// RescueArmed reports whether the given MAC currently has a rescue
+	// intent queued. When it returns true the machine's per-MAC block
+	// boots SystemRescue instead of its configured fleet target. May
+	// be nil (treated as "no rescue armed"). v0.11.0+.
+	RescueArmed func(mac string) bool
 }
 
 // RenderDispatch generates the full TFTP-served autoexec.ipxe for a
@@ -162,9 +168,11 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("goto target_default")
 	w("")
 
-	// Per-MAC blocks.
+	// Per-MAC blocks. A machine with a rescue intent armed renders the
+	// SystemRescue arm instead of its configured fleet target.
 	for _, m := range machines {
-		writeMachineBlock(&buf, m, ctx)
+		rescue := ctx.RescueArmed != nil && ctx.RescueArmed(m.MAC)
+		writeMachineBlock(&buf, m, ctx, rescue)
 	}
 
 	// Default arm — fall back to netboot.xyz embed.
@@ -212,12 +220,19 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	return buf.Bytes()
 }
 
-func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) {
+func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext, rescue bool) {
 	w := func(s string) { buf.WriteString(s); buf.WriteByte('\n') }
 	label := labelOf(m.MAC, m.Profile.Name)
 	name := m.Profile.Name
 	if name == "" {
 		name = m.MAC
+	}
+	// When a rescue intent is armed, the effective boot target is
+	// SystemRescue regardless of the fleet's configured Boot. The menu
+	// + echoes surface this so the console operator isn't surprised.
+	targetDesc := m.Profile.Boot
+	if rescue {
+		targetDesc = "systemrescue (RESCUE)"
 	}
 	preseedURL := fmt.Sprintf("http://%s:%d/autoinstall/%s/preseed.cfg",
 		ctx.AdvertisedIP, ctx.HTTPPort,
@@ -261,7 +276,7 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	fmt.Fprintf(buf, ":%s\n", label)
 	w("echo")
 	fmt.Fprintf(buf, "echo ===== [stage 4/5] MATCHED ARM: %s =====\n", name)
-	fmt.Fprintf(buf, "echo   fleet target: %s\n", m.Profile.Boot)
+	fmt.Fprintf(buf, "echo   fleet target: %s\n", targetDesc)
 	fmt.Fprintf(buf, "echo   mac: %s\n", m.MAC)
 	// v0.6.6: phone home that we entered matched arm.
 	fmt.Fprintf(buf, "chain --autofree http://%s/debug/probe/matched/%s || echo   (phone-home failed)\n", addr, name)
@@ -283,12 +298,12 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	// "NO MATCH" text and sleeps 8s, which is the right UX for
 	// iseq-miss but wrong for menu-driven choice.
 	fmt.Fprintf(buf, "menu pxe-beacon — %s (%s)\n", name, m.MAC)
-	fmt.Fprintf(buf, "item --gap fleet config: boot=%s\n", m.Profile.Boot)
+	fmt.Fprintf(buf, "item --gap fleet config: boot=%s\n", targetDesc)
 	fmt.Fprintf(buf, "item --default --key b %s_boot         Boot fleet target (default — auto in 30s): %s\n",
-		label, m.Profile.Boot)
+		label, targetDesc)
 	fmt.Fprintf(buf, "item            --key m menu_netbootxyz   netboot.xyz menu (manual OS picker)\n")
 	fmt.Fprintf(buf, "item            --key s %s_shell       iPXE shell (debug)\n", label)
-	fmt.Fprintf(buf, "echo pxe-beacon: press 'b' to boot %s now, 'm' for netboot.xyz menu, 's' for shell — or wait 30s\n", m.Profile.Boot)
+	fmt.Fprintf(buf, "echo pxe-beacon: press 'b' to boot %s now, 'm' for netboot.xyz menu, 's' for shell — or wait 30s\n", targetDesc)
 	fmt.Fprintf(buf, "choose --timeout 30000 --default %s_boot %s_menu_choice ||\n", label, label)
 	fmt.Fprintf(buf, "echo pxe-beacon: choose returned error (Ctrl+C?), defaulting to boot fleet target\n")
 	fmt.Fprintf(buf, "echo pxe-beacon: ===== menu choice: ${%s_menu_choice} =====\n", label)
@@ -306,13 +321,13 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	w("")
 	fmt.Fprintf(buf, ":%s_boot\n", label)
 	w("echo")
-	fmt.Fprintf(buf, "echo ===== [stage 5/5] BOOTING %s =====\n", m.Profile.Boot)
+	fmt.Fprintf(buf, "echo ===== [stage 5/5] BOOTING %s =====\n", targetDesc)
 	w("echo   ip      = ${ip}")
 	w("echo   netmask = ${netmask}")
 	w("echo   gateway = ${gateway}")
 	w("echo   dns     = ${dns}")
 	// v0.6.6: phone-home that we reached the boot stage.
-	fmt.Fprintf(buf, "chain --autofree http://%s/debug/probe/booting/%s || echo   (phone-home failed)\n", addr, m.Profile.Boot)
+	fmt.Fprintf(buf, "chain --autofree http://%s/debug/probe/booting/%s || echo   (phone-home failed)\n", addr, targetDesc)
 	w("sleep 2")
 
 	// v0.5.13: dhcp + netmask widening are done ONCE at the top of
@@ -320,6 +335,12 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 	// netmask with the DHCP-supplied /24, breaking the cross-subnet
 	// fix.
 	w("imgfree")
+
+	// v0.11.0: rescue intent overrides the configured boot target.
+	if rescue {
+		writeRescueArm(buf, m, ctx, label)
+		return
+	}
 
 	switch m.Profile.Boot {
 	case "debian-12":
@@ -437,6 +458,38 @@ func writeMachineBlock(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext) 
 		fmt.Fprintf(buf, "echo pxe-beacon: unknown boot target %q for %s; falling through\n", m.Profile.Boot, name)
 		w("goto target_default")
 	}
+}
+
+// writeRescueArm renders the SystemRescue boot arm for a machine whose
+// rescue intent is armed. SystemRescue is Arch/archiso, not casper:
+// the firmware constructs the squashfs URL itself from archiso_http_srv
+// + archisobasedir (→ .../assets/systemrescue/sysresccd/x86_64/airootfs.sfs),
+// so archiso_http_srv MUST point at the systemrescue assets dir with a
+// trailing slash. The kernel + initrd are fetched from the same tree at
+// explicit URLs. sysrescuecfg= delivers the per-MAC root pw / SSH key.
+//
+// Requires `pxe-beacon fetch systemrescue` to have populated the
+// data-dir; a missing squashfs surfaces as an archiso boot failure on
+// the console.
+func writeRescueArm(buf *bytes.Buffer, m fleet.Machine, ctx DispatchContext, label string) {
+	w := func(s string) { buf.WriteString(s); buf.WriteByte('\n') }
+	machyp := strings.ReplaceAll(m.MAC, ":", "-")
+	assetsBase := fmt.Sprintf("http://%s:%d/assets/systemrescue", ctx.AdvertisedIP, ctx.HTTPPort)
+	httpSrv := assetsBase + "/" // trailing slash: archiso appends sysresccd/x86_64/airootfs.sfs
+	kernelURL := assetsBase + "/sysresccd/boot/x86_64/vmlinuz"
+	initrdURL := assetsBase + "/sysresccd/boot/x86_64/sysresccd.img"
+	cfgURL := fmt.Sprintf("http://%s:%d/autoinstall/%s/sysrescue.yaml", ctx.AdvertisedIP, ctx.HTTPPort, machyp)
+
+	fmt.Fprintf(buf, "echo pxe-beacon: fetching SystemRescue kernel: %s\n", kernelURL)
+	fmt.Fprintf(buf, "echo pxe-beacon: (requires `pxe-beacon fetch systemrescue` to have populated data-dir)\n")
+	fmt.Fprintf(buf,
+		"kernel --name vmlinuz %s archisobasedir=sysresccd ip=dhcp archiso_http_srv=%s sysrescuecfg=%s --- || goto %s_fail_kernel\n",
+		kernelURL, httpSrv, cfgURL, label)
+	fmt.Fprintf(buf, "echo pxe-beacon: fetching SystemRescue initramfs: %s\n", initrdURL)
+	fmt.Fprintf(buf, "initrd --name sysresccd.img %s || goto %s_fail_initrd\n", initrdURL, label)
+	w("echo pxe-beacon: handing control to SystemRescue (boot)...")
+	fmt.Fprintf(buf, "boot || goto %s_fail_boot\n", label)
+	writeMachineErrorBlocks(buf, label, "systemrescue", assetsBase)
 }
 
 // writeMachineErrorBlocks emits labeled error handlers for the

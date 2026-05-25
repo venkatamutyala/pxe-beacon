@@ -72,7 +72,7 @@ func TestCache_IsPopulated_FalseWhenEmpty(t *testing.T) {
 func TestCache_IsPopulated_TrueAfterWrite(t *testing.T) {
 	c, _ := New(t.TempDir())
 	tdir, _ := c.TargetDir("ubuntu-22.04")
-	for _, f := range AssetFiles {
+	for _, f := range Targets["ubuntu-22.04"].Dests() {
 		if err := os.WriteFile(filepath.Join(tdir, f), []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -125,12 +125,44 @@ func TestNormalizeISOName(t *testing.T) {
 }
 
 func TestTargetsHaveAllAssetPaths(t *testing.T) {
-	// Sanity: every Target in the registry maps every AssetFile.
+	// Sanity: every Target maps at least one asset, and every dest
+	// path is a safe, nested-capable relative path with a non-empty
+	// ISO source.
 	for name, spec := range Targets {
-		for _, f := range AssetFiles {
-			if _, ok := spec.ISOPath[f]; !ok {
-				t.Errorf("target %q missing ISOPath for %q", name, f)
+		if len(spec.ISOPath) == 0 {
+			t.Errorf("target %q has no ISOPath entries", name)
+		}
+		for dest, iso := range spec.ISOPath {
+			if !safeAssetPath(dest) {
+				t.Errorf("target %q dest %q is not a safe asset path", name, dest)
+			}
+			if iso == "" {
+				t.Errorf("target %q dest %q has empty ISO source", name, dest)
 			}
 		}
+	}
+}
+
+func TestSafeAssetPath(t *testing.T) {
+	for _, ok := range []string{"vmlinuz", "sysresccd/x86_64/airootfs.sfs", "a/b/c.img"} {
+		if !safeAssetPath(ok) {
+			t.Errorf("safeAssetPath(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"", "/abs", "a/../b", "../escape", "a//b", "a/.hidden/c"} {
+		if safeAssetPath(bad) {
+			t.Errorf("safeAssetPath(%q) = true, want false", bad)
+		}
+	}
+}
+
+func TestCache_AssetPath_Nested(t *testing.T) {
+	c, _ := New(t.TempDir())
+	got, err := c.AssetPath("systemrescue", "sysresccd/x86_64/airootfs.sfs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(got, "/systemrescue/sysresccd/x86_64/airootfs.sfs") {
+		t.Errorf("AssetPath nested = %q", got)
 	}
 }

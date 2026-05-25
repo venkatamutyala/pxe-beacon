@@ -1,0 +1,30 @@
+# pxe-beacon EMBEDDED DEFAULT SystemRescue sysrescuecfg.
+#
+# Loaded by SystemRescue at boot via the kernel cmdline
+#   sysrescuecfg=http://<server>/autoinstall/<mac>/sysrescue.yaml
+# when a rescue intent is queued (PUT /intent {"action":"rescue"}).
+#
+# pxe-beacon Go-templates this. Vars: Name, MAC, MACHyp, AdvertisedIP,
+# HTTPPort, Params. Control access from fleet.yaml `params:`:
+#   rescue_root_password : live root password (defaults to "pxe")
+#   ssh_authorized_key   : public key injected into /root/.ssh (optional)
+#
+# TRUSTED-LAN ONLY: the default password is intentionally weak, matching
+# pxe-beacon's install creds. Set rescue_root_password in fleet.yaml.
+#
+# Override this file via the admin UI or <data-dir>/templates/defaults/
+# sysrescue.yaml.
+global:
+    rootpass: "{{with index .Params "rescue_root_password"}}{{.}}{{else}}pxe{{end}}"
+{{- if index .Params "ssh_authorized_key"}}
+
+# An SSH key was provided — fetch the pxe-beacon autorun script that
+# installs it and (re)starts sshd. SystemRescue autorun runs external
+# scripts only, so the key injection lives in sysrescue-setup.sh.
+autorun:
+    exec:
+        200:
+            url: "http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}/sysrescue-setup.sh"
+            shell: true
+            wait: never
+{{- end}}

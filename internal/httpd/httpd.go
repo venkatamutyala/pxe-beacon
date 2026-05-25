@@ -209,6 +209,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /autoinstall/{mac}/meta-data", s.handleMetaData)
 	s.mux.HandleFunc("GET /autoinstall/{mac}/preseed.cfg", s.handlePreseed)
 	s.mux.HandleFunc("GET /autoinstall/{mac}/kickstart.cfg", s.handleKickstart)
+	// v0.11.0: SystemRescue rescue config + its autorun setup script,
+	// served when a rescue intent is queued (see dispatch.go).
+	s.mux.HandleFunc("GET /autoinstall/{mac}/sysrescue.yaml", s.handleSysrescueConfig)
+	s.mux.HandleFunc("GET /autoinstall/{mac}/sysrescue-setup.sh", s.handleSysrescueSetup)
 	// v0.9.0: /done is the cloud-init phone_home wire endpoint (kept as
 	// a permanent alias); /events is the canonical API form. Both route
 	// to the same handler.
@@ -231,7 +235,11 @@ func (s *Server) routes() {
 		w.Header().Set("Content-Length", strconv.Itoa(len(openAPISpec)))
 		_, _ = w.Write(openAPISpec)
 	})
-	s.mux.HandleFunc("GET /assets/{target}/{file}", s.handleAsset)
+	// {file...} (not {file}) so archiso can fetch the nested
+	// sysresccd/x86_64/airootfs.sfs that SystemRescue's boot firmware
+	// constructs itself. Ubuntu's flat vmlinuz/initrd/squashfs still
+	// match.
+	s.mux.HandleFunc("GET /assets/{target}/{file...}", s.handleAsset)
 
 	// v0.8.0: K8s-style declarative boot-intent API. Hard-cut from
 	// v0.7.1 (no aliases). Loopback-only, no CSRF (curl/scripts/UI,
@@ -678,6 +686,95 @@ func (s *Server) handleMetaData(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	_, _ = io.WriteString(w, body)
+	s.log.Infof("GET %s -> 200, %d bytes [client=%s]", r.URL.Path, len(body), labelOf(p.Name, mac))
+}
+
+// rescueTemplateVars builds the standard template namespace shared by
+// the SystemRescue config + autorun script, mirroring handleUserData.
+func (s *Server) rescueTemplateVars(mac string, p fleet.Profile) map[string]any {
+	return map[string]any{
+		"Name":         p.Name,
+		"MAC":          mac,
+		"MACHyp":       strings.ReplaceAll(mac, ":", "-"),
+		"AdvertisedIP": s.opts.AdvertisedIP,
+		"HTTPPort":     s.opts.HTTPPort,
+		"Params":       p.Params,
+	}
+}
+
+// handleSysrescueConfig serves the per-MAC SystemRescue sysrescuecfg
+// YAML (loaded via the kernel's sysrescuecfg= param when a rescue
+// intent is armed). Uses the operator's `rescue:` file if set, else
+// the embedded default — both Go-templated with the standard vars so
+// params.rescue_root_password / params.ssh_authorized_key flow through.
+func (s *Server) handleSysrescueConfig(w http.ResponseWriter, r *http.Request) {
+	if !s.fleetReady(w, r) {
+		return
+	}
+	mac := s.extractMAC(w, r)
+	if mac == "" {
+		return
+	}
+	p := s.opts.Fleet.Lookup(mac)
+	var raw []byte
+	var err error
+	if p.Rescue != "" {
+		raw, err = os.ReadFile(p.Rescue)
+		if err != nil {
+			s.log.Errorf("GET %s -> 500 read rescue: %v", r.URL.Path, err)
+			http.Error(w, fmt.Sprintf("read rescue: %v", err), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		raw, err = assets.ReadDefault("sysrescue.yaml")
+		if err != nil {
+			s.log.Errorf("GET %s -> 500 read default sysrescue: %v", r.URL.Path, err)
+			http.Error(w, fmt.Sprintf("default sysrescue: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+	s.serveTemplated(w, r, "sysrescue.yaml", raw, p, mac, "text/yaml; charset=utf-8")
+}
+
+// handleSysrescueSetup serves the autorun shell script that injects the
+// operator SSH key + ensures sshd, referenced from sysrescue.yaml's
+// autorun.exec block. Always the embedded default (overridable on disk).
+func (s *Server) handleSysrescueSetup(w http.ResponseWriter, r *http.Request) {
+	if !s.fleetReady(w, r) {
+		return
+	}
+	mac := s.extractMAC(w, r)
+	if mac == "" {
+		return
+	}
+	p := s.opts.Fleet.Lookup(mac)
+	raw, err := assets.ReadDefault("sysrescue-setup.sh")
+	if err != nil {
+		s.log.Errorf("GET %s -> 500 read default sysrescue-setup: %v", r.URL.Path, err)
+		http.Error(w, fmt.Sprintf("default sysrescue-setup: %v", err), http.StatusInternalServerError)
+		return
+	}
+	s.serveTemplated(w, r, "sysrescue-setup.sh", raw, p, mac, "text/x-shellscript; charset=utf-8")
+}
+
+// serveTemplated parses + executes raw against the rescue template vars
+// and writes the result with the given content type. Shared by the two
+// SystemRescue handlers.
+func (s *Server) serveTemplated(w http.ResponseWriter, r *http.Request, name string, raw []byte, p fleet.Profile, mac, contentType string) {
+	tmpl, err := template.New(name).Parse(string(raw))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("parse %s template: %v", name, err), http.StatusInternalServerError)
+		return
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, s.rescueTemplateVars(mac, p)); err != nil {
+		http.Error(w, fmt.Sprintf("render %s: %v", name, err), http.StatusInternalServerError)
+		return
+	}
+	body := buf.Bytes()
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	_, _ = w.Write(body)
 	s.log.Infof("GET %s -> 200, %d bytes [client=%s]", r.URL.Path, len(body), labelOf(p.Name, mac))
 }
 

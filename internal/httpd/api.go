@@ -146,16 +146,17 @@ func (s *Server) handleAPISetIntent(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logIntent(r, mac, p.Name, "install", 200)
 	case "rescue":
-		// v0.8.1: rescue boot target not yet wired into the dispatch
-		// script (tracked for v0.8.2). Return 501 and do NOT touch
-		// the pending store — accepting rescue today would queue an
-		// intent that silently boots the configured install OS
-		// instead, which is worse than refusing the call.
-		s.logIntent(r, mac, p.Name, "rescue", 501)
-		writeAPIError(w, http.StatusNotImplemented, pxebeacon.ErrCodeRescueUnimplemented,
-			"rescue boot target not yet wired (tracked for v0.8.2); intent NOT queued",
-			map[string]any{"tracked": "v0.8.2"})
-		return
+		// v0.11.0: rescue queues a SystemRescue boot. The dispatch
+		// script renders the rescue arm for any MAC with this intent
+		// (requires `pxe-beacon fetch systemrescue` to have populated
+		// the data-dir; access via params.rescue_root_password /
+		// params.ssh_authorized_key, served at /autoinstall/{mac}/sysrescue.yaml).
+		if _, err := s.opts.Pending.Rescue(mac); err != nil {
+			writeAPIError(w, http.StatusInternalServerError, pxebeacon.ErrCodePendingFailed,
+				"rescue: "+err.Error(), nil)
+			return
+		}
+		s.logIntent(r, mac, p.Name, "rescue", 200)
 	case "":
 		s.opts.Pending.Cancel(mac)
 		s.logIntent(r, mac, p.Name, "cancel", 200)
@@ -253,6 +254,7 @@ func (s *Server) profileFromBody(w http.ResponseWriter, r *http.Request, b pxebe
 		Preseed:    resolve(b.Preseed),
 		Kickstart:  resolve(b.Kickstart),
 		CloudInit:  resolve(b.CloudInit),
+		Rescue:     resolve(b.Rescue),
 		IPXEScript: resolve(b.IPXEScript),
 		Params:     b.Params,
 	}, true

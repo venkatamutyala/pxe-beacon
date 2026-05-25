@@ -329,6 +329,124 @@ func TestHTTP_MetaData(t *testing.T) {
 	}
 }
 
+// startServerFromFleetYAML boots an httpd.Server backed by the given
+// fleet.yaml content (written into a temp dir). Returns the listen addr.
+func startServerFromFleetYAML(t *testing.T, yaml string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fleet.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logBuf := &bytes.Buffer{}
+	log := narrlog.New("test", narrlog.LevelDebug, logBuf)
+	f, err := fleet.Load(filepath.Join(dir, "fleet.yaml"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := fleet.NewTracker(f, 5*time.Second)
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	addr := ln.Addr().String()
+	_, portStr, _ := net.SplitHostPort(addr)
+	port, _ := strconv.Atoi(portStr)
+	_ = ln.Close()
+	s, err := New(Options{
+		Listen: addr, AdvertisedIP: "10.0.0.5", HTTPPort: port,
+		Logger: log, Fleet: f, FleetStatus: tr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = s.Serve(ctx); close(done) }()
+	time.Sleep(80 * time.Millisecond)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+		t.Logf("log dump:\n%s", logBuf.String())
+	})
+	return addr
+}
+
+func TestHTTP_SysrescueConfig_RendersParams(t *testing.T) {
+	// v0.11.0: the embedded default sysrescuecfg templates the root
+	// password + (when a key is present) an autorun block pointing at
+	// the setup script. Both come from params.
+	addr := startServerFromFleetYAML(t, `
+machines:
+  - mac: 58:47:ca:70:c7:c9
+    name: venkat-1
+    boot: debian-12
+    params:
+      rescue_root_password: hunter2
+      ssh_authorized_key: "ssh-ed25519 AAAAEXAMPLE op@host"
+`)
+	resp, err := http.Get("http://" + addr + "/autoinstall/58-47-ca-70-c7-c9/sysrescue.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	for _, want := range []string{
+		`rootpass: "hunter2"`,
+		"autorun:",
+		"http://10.0.0.5:" + portOf(addr) + "/autoinstall/58-47-ca-70-c7-c9/sysrescue-setup.sh",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("sysrescue.yaml missing %q:\n%s", want, s)
+		}
+	}
+
+	// The setup script must carry the SSH key.
+	resp2, err := http.Get("http://" + addr + "/autoinstall/58-47-ca-70-c7-c9/sysrescue-setup.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	setup, _ := io.ReadAll(resp2.Body)
+	if !strings.Contains(string(setup), "ssh-ed25519 AAAAEXAMPLE op@host") {
+		t.Errorf("setup script missing SSH key:\n%s", setup)
+	}
+	if !strings.Contains(string(setup), "authorized_keys") {
+		t.Errorf("setup script missing authorized_keys write:\n%s", setup)
+	}
+}
+
+func TestHTTP_SysrescueConfig_DefaultsWhenNoParams(t *testing.T) {
+	// No params → default weak password, no autorun block.
+	addr := startServerFromFleetYAML(t, `
+machines:
+  - mac: 58:47:ca:70:c7:c9
+    name: venkat-1
+    boot: debian-12
+`)
+	resp, err := http.Get("http://" + addr + "/autoinstall/58-47-ca-70-c7-c9/sysrescue.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	if !strings.Contains(s, `rootpass: "pxe"`) {
+		t.Errorf("expected default rootpass=pxe:\n%s", s)
+	}
+	if strings.Contains(s, "autorun:") {
+		t.Errorf("no SSH key → no autorun block expected:\n%s", s)
+	}
+}
+
+func portOf(addr string) string {
+	_, p, _ := net.SplitHostPort(addr)
+	return p
+}
+
 func TestHTTP_InstallerDonePhoneHome(t *testing.T) {
 	addr, _, tr, _ := startFleetServer(t)
 	resp, err := http.Post("http://"+addr+"/autoinstall/58-47-ca-70-c7-c9/done", "application/json", strings.NewReader("{}"))
@@ -660,6 +778,31 @@ func TestHTTP_Assets_ServesFromDataDir(t *testing.T) {
 	}
 	if ct := resp.Header.Get("Content-Type"); ct != "application/octet-stream" {
 		t.Errorf("Content-Type = %q, want application/octet-stream", ct)
+	}
+}
+
+func TestHTTP_Assets_ServesNestedPath(t *testing.T) {
+	// v0.11.0: the wildcard {file...} route must serve the nested
+	// archiso layout SystemRescue's firmware constructs itself.
+	addr, dataDir := startFleetServerWithDataDir(t)
+	nested := filepath.Join(dataDir, "systemrescue", "sysresccd", "x86_64")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "airootfs.sfs"), []byte("FAKESQUASHFS"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Get("http://" + addr + "/assets/systemrescue/sysresccd/x86_64/airootfs.sfs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for nested asset", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "FAKESQUASHFS" {
+		t.Errorf("body = %q, want FAKESQUASHFS", body)
 	}
 }
 

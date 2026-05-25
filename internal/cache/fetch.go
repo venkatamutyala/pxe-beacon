@@ -27,8 +27,9 @@ type FetchOpts struct {
 	HTTPClient *http.Client
 }
 
-// Fetch downloads an ISO for `target` and extracts the AssetFiles
-// into the cache's target subdir. Returns the Manifest on success.
+// Fetch downloads an ISO for `target` and extracts the spec's assets
+// (TargetSpec.ISOPath) into the cache's target subdir, preserving any
+// nested dest layout. Returns the Manifest on success.
 //
 // The implementation is two-pass:
 //  1. Stream the ISO to a temp file on disk (ISO9660 needs random
@@ -81,13 +82,15 @@ func (c *Cache) Fetch(ctx context.Context, targetName string, opts FetchOpts) (*
 		Files:     map[string]Asset{},
 	}
 
-	for _, name := range AssetFiles {
-		isoInternalPath, ok := spec.ISOPath[name]
-		if !ok {
+	for _, name := range spec.Dests() {
+		isoInternalPath := spec.ISOPath[name]
+		dest := filepath.Join(tdir, filepath.FromSlash(name))
+		// SystemRescue assets are nested (sysresccd/...); create the
+		// parent dirs before extracting.
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			_ = isoFile.Close()
-			return nil, fmt.Errorf("target %q: no ISO path for asset %q", targetName, name)
+			return nil, fmt.Errorf("mkdir for %s: %w", name, err)
 		}
-		dest := filepath.Join(tdir, name)
 		size, sum, err := extractFile(img, isoInternalPath, dest)
 		if err != nil {
 			_ = isoFile.Close()
