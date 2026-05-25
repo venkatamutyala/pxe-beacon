@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -1111,6 +1112,73 @@ defaults:
 		t.Logf("log dump:\n%s", logBuf.String())
 	})
 	return addr, fleetPath, dataDir
+}
+
+func TestHTTP_Admin_CloudInitEditor(t *testing.T) {
+	addr, _, _ := startFleetServerWithAdminData(t)
+	mac := "aa-bb-cc-dd-ee-99"
+	editURL := "http://" + addr + "/admin/machines/" + mac + "/cloud-init"
+
+	// View page renders + carries a CSRF token.
+	resp, err := http.Get(editURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET editor = %d", resp.StatusCode)
+	}
+	m := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindSubmatch(page)
+	if m == nil {
+		t.Fatalf("no csrf token in editor page")
+	}
+	csrf := string(m[1])
+
+	// Don't follow redirects, so we can read the flash kind off Location.
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	post := func(action, content string) string {
+		form := url.Values{"csrf": {csrf}, "content": {content}}
+		req, _ := http.NewRequest("POST", "http://"+addr+action, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		r, perr := noRedirect.Do(req)
+		if perr != nil {
+			t.Fatal(perr)
+		}
+		r.Body.Close()
+		return r.Header.Get("Location")
+	}
+
+	// Content with phone_home is rejected (kind=err), nothing written.
+	if loc := post("/admin/machines/"+mac+"/cloud-init", "#cloud-config\nphone_home:\n  url: http://x/done\n"); !strings.Contains(loc, "kind=err") {
+		t.Errorf("phone_home content should be rejected, redirect was %q", loc)
+	}
+
+	// Valid content saves (kind=ok) and is then served at /user-data,
+	// with the pxe-beacon-appended phone_home.
+	if loc := post("/admin/machines/"+mac+"/cloud-init", "#cloud-config\nhostname: {{.Name}}\nruncmd:\n  - [echo, MARKER_XYZ]\n"); !strings.Contains(loc, "kind=ok") {
+		t.Fatalf("valid save should succeed, redirect was %q", loc)
+	}
+	ud, _ := http.Get("http://" + addr + "/autoinstall/" + mac + "/user-data")
+	body, _ := io.ReadAll(ud.Body)
+	ud.Body.Close()
+	if !strings.Contains(string(body), "MARKER_XYZ") {
+		t.Errorf("served user-data missing the override content:\n%s", body)
+	}
+	if !strings.Contains(string(body), "phone_home:") {
+		t.Errorf("served user-data missing the appended phone_home:\n%s", body)
+	}
+
+	// Reset removes the override → user-data falls back to the embedded default.
+	if loc := post("/admin/machines/"+mac+"/cloud-init-reset", ""); !strings.Contains(loc, "kind=ok") {
+		t.Errorf("reset should succeed, redirect was %q", loc)
+	}
+	ud2, _ := http.Get("http://" + addr + "/autoinstall/" + mac + "/user-data")
+	body2, _ := io.ReadAll(ud2.Body)
+	ud2.Body.Close()
+	if strings.Contains(string(body2), "MARKER_XYZ") {
+		t.Errorf("override should be gone after reset:\n%s", body2)
+	}
 }
 
 func TestHTTP_Admin_IndexRendersHTML(t *testing.T) {

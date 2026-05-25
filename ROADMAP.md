@@ -115,6 +115,22 @@ lookup via a small embedded curated table (not the full IEEE registry).
 Also folded in: the **Node 20 → 24 CI bump** (`actions/checkout@v5`,
 `actions/setup-go@v6`) ahead of GitHub's June 2 2026 forced migration.
 
+## v0.14.0 — "Inline cloud-init editing" ✅ SHIPPED
+
+**Shipped:** per-machine cloud-init authoring from `/admin`. The
+`cloud_init:` field is a path; this adds a textarea editor that saves a
+per-MAC override at `<data-dir>/machines/<mac>/cloud-init.yaml`. Serve
+precedence: override file > `cloud_init:` path > embedded default — no
+`fleet.yaml` mutation (mirrors the existing template-override editor).
+Save validates against the v0.12 phone_home-ownership rule
+(`fleet.DefinesPhoneHome`, exported). Also: `-data-dir` now defaults to
+`./.pxe-beacon` (CWD subfolder, gitignored) instead of the XDG path, so
+fetched assets + overrides land where you run the binary.
+
+**Design decision:** managed override file under the data-dir, chosen
+over inline-in-fleet.yaml (which the YAML writer would bloat + strip
+comments from) per the PM/PXE review.
+
 ## Next: "Persistence + history" (features)
 
 **Theme:** State survives restart; audit log is the same journal.

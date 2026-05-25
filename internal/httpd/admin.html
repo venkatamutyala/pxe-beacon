@@ -86,6 +86,7 @@
       <td>{{if .Profile.CloudInit}}{{.Profile.CloudInit}}{{else}}<span class="mac">(default)</span>{{end}}</td>
       <td>{{if .Profile.IPXEScript}}{{.Profile.IPXEScript}}{{else}}—{{end}}</td>
       <td class="actions">
+        <a href="/admin/machines/{{.MAC}}/cloud-init"><button type="button">cloud-init</button></a>
         <button type="button" class="danger" data-delete data-mac="{{.MAC}}" data-name="{{.Profile.Name}}">delete</button>
       </td>
     </tr>

@@ -10,3 +10,6 @@ commands.txt
 
 # core dumps
 core
+
+# default -data-dir (fetched assets + per-machine overrides)
+.pxe-beacon/

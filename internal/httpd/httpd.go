@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -312,6 +313,10 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /admin/templates-reset/{name...}", loopbackOnly(http.HandlerFunc(s.csrfGuard(s.handleAdminTemplateReset))))
 	s.mux.Handle("POST /admin/templates/{name...}", loopbackOnly(http.HandlerFunc(s.csrfGuard(s.handleAdminTemplateSave))))
 	s.mux.Handle("POST /admin/reload", loopbackOnly(http.HandlerFunc(s.csrfGuard(s.handleAdminReload))))
+	// v0.14.0: per-machine cloud-init content editor (override on disk).
+	s.mux.Handle("GET /admin/machines/{mac}/cloud-init", loopbackOnly(http.HandlerFunc(s.handleAdminCloudInitView)))
+	s.mux.Handle("POST /admin/machines/{mac}/cloud-init", loopbackOnly(http.HandlerFunc(s.csrfGuard(s.handleAdminCloudInitSave))))
+	s.mux.Handle("POST /admin/machines/{mac}/cloud-init-reset", loopbackOnly(http.HandlerFunc(s.csrfGuard(s.handleAdminCloudInitReset))))
 }
 
 // macHyphen is what iPXE's ${net0/mac:hexhyp} produces and what we
@@ -413,7 +418,13 @@ func (s *Server) handleUserData(w http.ResponseWriter, r *http.Request) {
 	p := s.opts.Fleet.Lookup(mac)
 	var raw []byte
 	var err error
-	if p.CloudInit != "" {
+	// v0.14.0: precedence is per-MAC override (authored via the /admin
+	// editor, on disk under the data-dir) > fleet cloud_init: path >
+	// embedded default. The override lets operators paste content from
+	// the UI without a path or an SSH session.
+	if ov, ok := s.machineCloudInitOverride(mac); ok {
+		raw = ov
+	} else if p.CloudInit != "" {
 		raw, err = os.ReadFile(p.CloudInit)
 		if err != nil {
 			s.log.Errorf("GET %s -> 500 read cloud_init: %v", r.URL.Path, err)
@@ -474,6 +485,31 @@ func (s *Server) handleUserData(w http.ResponseWriter, r *http.Request) {
 		s.opts.Tracker.NoteServed("user-data-anon")
 	}
 	s.log.Infof("GET %s -> 200, %d bytes [client=%s]", r.URL.Path, len(body), labelOf(p.Name, mac))
+}
+
+// machineCloudInitOverridePath returns the on-disk path of the per-MAC
+// cloud-init override (authored via /admin), or "" when no data-dir is
+// configured. The MAC is hyphen-form (URL/dir-safe); the caller passes a
+// canonical colon-MAC.
+func (s *Server) machineCloudInitOverridePath(mac string) string {
+	if s.opts.DataDir == "" {
+		return ""
+	}
+	return filepath.Join(s.opts.DataDir, "machines", strings.ReplaceAll(mac, ":", "-"), "cloud-init.yaml")
+}
+
+// machineCloudInitOverride returns the per-MAC override content if one
+// exists on disk.
+func (s *Server) machineCloudInitOverride(mac string) ([]byte, bool) {
+	p := s.machineCloudInitOverridePath(mac)
+	if p == "" {
+		return nil, false
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil, false
+	}
+	return b, true
 }
 
 // cloudInitPhoneHome builds the pxe-beacon-owned phone_home block appended

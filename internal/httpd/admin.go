@@ -24,14 +24,18 @@ var adminHTMLSrc string
 //go:embed admin_template.html
 var adminTemplateHTMLSrc string
 
+//go:embed admin_cloudinit.html
+var adminCloudInitHTMLSrc string
+
 // adminToken is the per-process CSRF token. Generated once at server
 // startup and validated on every POST to /admin/*. Same-origin
 // browsers only — non-loopback requests are rejected by the
 // loopback middleware before they ever reach the CSRF check.
 type adminState struct {
-	csrf      string
-	indexTmpl *htmltmpl.Template
-	editTmpl  *htmltmpl.Template
+	csrf          string
+	indexTmpl     *htmltmpl.Template
+	editTmpl      *htmltmpl.Template
+	cloudInitTmpl *htmltmpl.Template
 }
 
 func newAdminState() (*adminState, error) {
@@ -47,10 +51,15 @@ func newAdminState() (*adminState, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse admin_template.html: %w", err)
 	}
+	ci, err := htmltmpl.New("admin-cloudinit").Parse(adminCloudInitHTMLSrc)
+	if err != nil {
+		return nil, fmt.Errorf("parse admin_cloudinit.html: %w", err)
+	}
 	return &adminState{
-		csrf:      base64.RawURLEncoding.EncodeToString(b),
-		indexTmpl: idx,
-		editTmpl:  edit,
+		csrf:          base64.RawURLEncoding.EncodeToString(b),
+		indexTmpl:     idx,
+		editTmpl:      edit,
+		cloudInitTmpl: ci,
 	}, nil
 }
 
@@ -248,6 +257,129 @@ func (s *Server) handleAdminTemplateReset(w http.ResponseWriter, r *http.Request
 	}
 	s.log.Infof("admin: reset override for %s (removed %s)", rel, overridePath)
 	http.Redirect(w, r, "/admin/templates/"+rel+"?flash=reset&kind=ok", http.StatusSeeOther)
+}
+
+// handleAdminCloudInitView handles GET /admin/machines/{mac}/cloud-init —
+// the per-machine cloud-init content editor (v0.14.0). Loads the on-disk
+// override if present, else seeds the textarea from the machine's
+// fleet.yaml cloud_init: path (if set + readable), else the embedded
+// default — so "edit" always starts from what would actually be served.
+func (s *Server) handleAdminCloudInitView(w http.ResponseWriter, r *http.Request) {
+	if !s.fleetReady(w, r) {
+		return
+	}
+	mac, err := fleet.CanonicalMAC(r.PathValue("mac"))
+	if err != nil {
+		http.Error(w, "invalid MAC", http.StatusBadRequest)
+		return
+	}
+	if s.opts.DataDir == "" {
+		http.Error(w, "no data-dir configured (start pxe-beacon with -data-dir to enable per-machine overrides)", http.StatusBadRequest)
+		return
+	}
+	p := s.opts.Fleet.Lookup(mac)
+	ovPath := s.machineCloudInitOverridePath(mac)
+
+	var content, source string
+	hasOverride := false
+	if b, ok := s.machineCloudInitOverride(mac); ok {
+		content, hasOverride = string(b), true
+	} else if p.CloudInit != "" {
+		if b, rerr := os.ReadFile(p.CloudInit); rerr == nil {
+			content = string(b)
+			source = "starting from fleet cloud_init: " + p.CloudInit
+		}
+	}
+	if content == "" && !hasOverride {
+		if b, derr := assets.ReadDefault("cloud-init.yaml"); derr == nil {
+			content = string(b)
+			source = "starting from embedded default"
+		}
+	}
+
+	name := p.Name
+	if name == "" {
+		name = mac
+	}
+	vm := struct {
+		Name, MAC, MACHyp              string
+		HasOverride                    bool
+		OverridePath, Content          string
+		Source, CSRF, Flash, FlashKind string
+	}{
+		Name: name, MAC: mac, MACHyp: strings.ReplaceAll(mac, ":", "-"),
+		HasOverride: hasOverride, OverridePath: ovPath, Content: content,
+		Source: source, CSRF: s.admin.csrf,
+		Flash: r.URL.Query().Get("flash"), FlashKind: r.URL.Query().Get("kind"),
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := s.admin.cloudInitTmpl.Execute(w, vm); err != nil {
+		s.log.Warnf("admin cloud-init render: %v", err)
+	}
+}
+
+// handleAdminCloudInitSave handles POST /admin/machines/{mac}/cloud-init.
+// Validates that the content doesn't define its own phone_home (pxe-beacon
+// owns it), then writes the override file atomically.
+func (s *Server) handleAdminCloudInitSave(w http.ResponseWriter, r *http.Request) {
+	mac, err := fleet.CanonicalMAC(r.PathValue("mac"))
+	if err != nil {
+		http.Error(w, "invalid MAC", http.StatusBadRequest)
+		return
+	}
+	machyp := strings.ReplaceAll(mac, ":", "-")
+	ovPath := s.machineCloudInitOverridePath(mac)
+	if ovPath == "" {
+		http.Error(w, "no data-dir configured", http.StatusBadRequest)
+		return
+	}
+	content := r.FormValue("content")
+	if fleet.DefinesPhoneHome([]byte(content)) {
+		s.cloudInitFlash(w, r, machyp, "err", "remove phone_home — pxe-beacon appends its own tokenized phone_home (it owns the callback)")
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(ovPath), 0o755); err != nil {
+		http.Error(w, fmt.Sprintf("mkdir: %v", err), http.StatusInternalServerError)
+		return
+	}
+	tmp := ovPath + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
+		http.Error(w, fmt.Sprintf("write: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if err := os.Rename(tmp, ovPath); err != nil {
+		http.Error(w, fmt.Sprintf("rename: %v", err), http.StatusInternalServerError)
+		return
+	}
+	s.log.Infof("admin: saved cloud-init override for %s (%d bytes) at %s", mac, len(content), ovPath)
+	s.cloudInitFlash(w, r, machyp, "ok", "saved")
+}
+
+// handleAdminCloudInitReset handles POST /admin/machines/{mac}/cloud-init-reset
+// — deletes the override so the machine reverts to its fleet.yaml path (or
+// the embedded default).
+func (s *Server) handleAdminCloudInitReset(w http.ResponseWriter, r *http.Request) {
+	mac, err := fleet.CanonicalMAC(r.PathValue("mac"))
+	if err != nil {
+		http.Error(w, "invalid MAC", http.StatusBadRequest)
+		return
+	}
+	machyp := strings.ReplaceAll(mac, ":", "-")
+	ovPath := s.machineCloudInitOverridePath(mac)
+	if ovPath == "" {
+		http.Error(w, "no data-dir configured", http.StatusBadRequest)
+		return
+	}
+	if err := os.Remove(ovPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		http.Error(w, fmt.Sprintf("remove: %v", err), http.StatusInternalServerError)
+		return
+	}
+	s.log.Infof("admin: deleted cloud-init override for %s", mac)
+	s.cloudInitFlash(w, r, machyp, "ok", "override deleted")
+}
+
+func (s *Server) cloudInitFlash(w http.ResponseWriter, r *http.Request, machyp, kind, msg string) {
+	http.Redirect(w, r, "/admin/machines/"+machyp+"/cloud-init?flash="+escape(msg)+"&kind="+kind, http.StatusSeeOther)
 }
 
 // handleAdminReload handles POST /admin/reload — in-process equivalent

@@ -120,20 +120,19 @@ func sortedTargets() []string {
 	return out
 }
 
-// defaultDataDir returns a reasonable default for -data-dir:
-// $XDG_DATA_HOME/pxe-beacon if set, else ~/.local/share/pxe-beacon,
-// else ./data as a last resort.
+// defaultDataDir returns the default for -data-dir: a `.pxe-beacon`
+// subfolder of the current working directory, so fetched distro assets
+// and per-machine overrides land next to where you run the binary
+// (discoverable + easy to clean up). $PXE_BEACON_DATA overrides it; the
+// container image passes -data-dir /var/lib/pxe-beacon explicitly.
 func defaultDataDir() string {
 	if d := os.Getenv("PXE_BEACON_DATA"); d != "" {
 		return d
 	}
-	if d := os.Getenv("XDG_DATA_HOME"); d != "" {
-		return filepath.Join(d, "pxe-beacon")
+	if cwd, err := os.Getwd(); err == nil {
+		return filepath.Join(cwd, ".pxe-beacon")
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".local", "share", "pxe-beacon")
-	}
-	return "./data"
+	return "./.pxe-beacon"
 }
 
 // progressPrinter shows a `XX.X MB / YY.Y MB (zz%)` line that

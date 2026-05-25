@@ -418,6 +418,20 @@ token-guarded `POST /autoinstall/{mac}/log`; read the last ~64 KiB at
 `GET /api/v1/machines/{mac}/logs` (loopback-only, in-memory, cleared on
 restart). Closes the "it failed and I have no idea why" gap.
 
+#### Editing cloud-init from the UI (v0.14.0+)
+
+The `cloud_init:` field in `fleet.yaml` (and the admin form) is a **file
+path**. To author content without SSHing to the box, each machine row in
+`/admin` has a **cloud-init** editor: paste the body into a textarea and
+it's saved as a per-MAC override under
+`<data-dir>/machines/<mac>/cloud-init.yaml`. At serve time the precedence
+is **override file > `cloud_init:` path > embedded default**, so the
+editor wins without touching `fleet.yaml`. "Delete override" reverts to
+the path/default. Requires `-data-dir` (defaults to `./.pxe-beacon`).
+Saving content that defines its own `phone_home:` is rejected (pxe-beacon
+appends its own — see Secure callbacks); `{{.Name}}`, `{{.MACHyp}}`,
+`{{.Params.x}}`, etc. are available in the body.
+
 #### Discovery (v0.13.0+)
 
 proxyDHCP sees every PXE `DISCOVER` on the segment — including from
@@ -584,7 +598,7 @@ minutes get a ⚠ stalled flag. JSON version at `/status.json`.
 | `-ipxe-script`   | (embedded)                                    | path to a custom `/boot.ipxe` template                 |
 | `-crosscert`     | off                                           | emit `set crosscert` (older iPXE + HTTPS chain target) |
 | `-hint-after`    | `10s`                                         | fire the "client never fetched" hint after this        |
-| `-data-dir`      | `~/.local/share/pxe-beacon`                   | dir holding `pxe-beacon fetch` output, served at `/assets/` |
+| `-data-dir`      | `./.pxe-beacon`                               | dir holding `pxe-beacon fetch` output + per-machine overrides, served at `/assets/` (`$PXE_BEACON_DATA` overrides) |
 | `-pending-ttl`   | `15m`                                         | how long a queued deploy / rescue stays valid before auto-cancel (`0` = no expiry) |
 | `-callback-ttl`  | `24h`                                         | lifetime of the callback bearer token (see Secure callbacks) |
 | `-insecure-callbacks` | off                                      | accept callbacks without a token (present-but-invalid still rejected) |

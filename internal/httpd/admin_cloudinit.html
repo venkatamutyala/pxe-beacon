@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>pxe-beacon — cloud-init for {{.Name}}</title>
+<style>
+  body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; background: #0d1117; color: #c9d1d9; margin: 0; padding: 1.5rem; max-width: 1100px; }
+  h1 { margin: 0 0 .25rem 0; font-size: 1.2rem; }
+  .meta { color: #8b949e; font-size: .85rem; margin-bottom: 1rem; }
+  .nav a { color: #58a6ff; margin-right: 1.5rem; text-decoration: none; }
+  textarea {
+    background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px;
+    font-family: inherit; font-size: .85rem; padding: .75rem; width: 100%;
+    min-height: 30rem; box-sizing: border-box;
+  }
+  button {
+    background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px;
+    font-family: inherit; font-size: .9rem; padding: .5rem 1rem; cursor: pointer;
+  }
+  button.primary { background: #1f6feb; border-color: #1f6feb; color: white; }
+  button.danger { color: #f85149; border-color: #6e2424; }
+  .actions { margin-top: .75rem; display: flex; gap: .5rem; align-items: center; }
+  .flash-ok { background: #1a3d1a; border: 1px solid #2da44e; padding: .5rem .75rem; border-radius: 4px; margin: .5rem 0; }
+  .flash-err { background: #3d1a1a; border: 1px solid #f85149; padding: .5rem .75rem; border-radius: 4px; margin: .5rem 0; }
+  .badge { color: #d29922; font-size: .8rem; padding: .1rem .5rem; background: #3d3014; border-radius: 3px; margin-left: .5rem; }
+  .embedded { color: #2da44e; font-size: .8rem; padding: .1rem .5rem; background: #14361b; border-radius: 3px; margin-left: .5rem; }
+  .hint { color: #8b949e; font-size: .85rem; margin: .5rem 0; }
+  code { color: #d2a8ff; }
+</style>
+</head>
+<body>
+<h1>cloud-init: {{.Name}}
+{{if .HasOverride}}<span class="badge">override on disk</span>
+{{else}}<span class="embedded">{{.Source}}</span>{{end}}
+</h1>
+<div class="meta">
+  mac: <code>{{.MAC}}</code> · saved to: <code>{{.OverridePath}}</code>
+</div>
+<div class="nav">
+  <a href="/admin">← back to /admin</a>
+</div>
+
+{{if .Flash}}<div class="flash-{{.FlashKind}}">{{.Flash}}</div>{{end}}
+
+<p class="hint">
+  Paste this machine's cloud-init here. It's stored byte-for-byte and
+  served (templated) ahead of any <code>cloud_init:</code> path in fleet.yaml.
+  Do <strong>not</strong> add a <code>phone_home:</code> — pxe-beacon appends
+  its own tokenized one; saving with one is rejected. Vars available:
+  <code>{{"{{.Name}}"}}</code>, <code>{{"{{.MACHyp}}"}}</code>,
+  <code>{{"{{.AdvertisedIP}}"}}</code>, <code>{{"{{.HTTPPort}}"}}</code>,
+  <code>{{"{{.Params.x}}"}}</code>.
+</p>
+
+<form method="POST" action="/admin/machines/{{.MACHyp}}/cloud-init">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <textarea name="content" spellcheck="false">{{.Content}}</textarea>
+  <div class="actions">
+    <button type="submit" class="primary">save override</button>
+    {{if .HasOverride}}
+      <button type="submit" formaction="/admin/machines/{{.MACHyp}}/cloud-init-reset" class="danger"
+              onclick="return confirm('Delete this override? The machine reverts to its fleet.yaml cloud_init path (or the embedded default).');">
+        delete override
+      </button>
+    {{end}}
+    <span style="color:#8b949e;font-size:.85rem">takes effect on the next request</span>
+  </div>
+</form>
+
+</body>
+</html>

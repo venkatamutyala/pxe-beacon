@@ -392,9 +392,19 @@ func cloudInitDefinesPhoneHome(path string) bool {
 	if err != nil {
 		return false
 	}
-	for _, line := range strings.Split(string(b), "\n") {
+	return DefinesPhoneHome(b)
+}
+
+// DefinesPhoneHome reports whether cloud-init content declares a top-level
+// `phone_home:` key. Column-0 scan (not YAML parse) so it works on raw
+// template content with unrendered {{...}} placeholders; phone_home is
+// always a top-level module, so a column-0 match is the right signal and
+// commented / nested lines are ignored. Exported so the admin per-machine
+// editor can validate pasted content before writing it.
+func DefinesPhoneHome(content []byte) bool {
+	for _, line := range strings.Split(string(content), "\n") {
 		if !strings.HasPrefix(line, "phone_home") {
-			continue // column-0 only: skip comments (# ...) and nested keys
+			continue
 		}
 		if rest := strings.TrimSpace(strings.TrimPrefix(line, "phone_home")); strings.HasPrefix(rest, ":") {
 			return true
