@@ -258,15 +258,51 @@ Restart of pxe-beacon also clears every queued action. The `/admin`
 UI has per-row install / rescue / cancel buttons that PUT the same
 endpoint with the matching body.
 
-Full REST surface (loopback-only, no auth — same security model as
-`/admin`):
+Full REST surface (loopback-only — see security model below):
 
 | method | path | what |
 |---|---|---|
-| `PUT`  | `/api/v1/machines/{mac}/intent` | set desired action (`install`, `rescue`, or `null`) |
-| `GET`  | `/api/v1/machines/{mac}/intent` | read desired + observed |
-| `GET`  | `/api/v1/machines/{mac}` | full per-machine view (fleet config + desired + observed) |
-| `GET`  | `/api/v1/machines` | all fleet machines |
+| `GET`    | `/api/v1/machines` | list fleet machines (paginated: `?limit=&offset=`) |
+| `POST`   | `/api/v1/machines` | create a machine (JSON body; 201 + ETag) |
+| `GET`    | `/api/v1/machines/{mac}` | full per-machine view; sets `ETag` |
+| `PUT`    | `/api/v1/machines/{mac}` | update config (requires `If-Match`) |
+| `DELETE` | `/api/v1/machines/{mac}` | delete (idempotent; honors `If-Match`) |
+| `PUT`    | `/api/v1/machines/{mac}/intent` | set desired action (`install`, `rescue`, or `null`) |
+| `GET`    | `/api/v1/machines/{mac}/intent` | read desired + observed |
+| `POST`   | `/api/v1/machines/{mac}/events` | report install lifecycle (`installer-done`/`installer-failed`); JSON or form |
+| `GET`    | `/openapi.yaml` | the OpenAPI 3 spec for the above |
+| `GET`    | `/healthz`, `/readyz` | liveness / readiness probes |
+
+The `/admin` page is a browser client of these same endpoints (v0.9.0
+folded fleet CRUD out of form-encoded `/admin/fleet` into the JSON API).
+
+**Security model (v0.9.0):** all `/api/v1/*` is loopback-only. Mutation
+endpoints additionally require `Content-Type: application/json` — a
+cross-origin browser can't send that without a CORS preflight that
+fails (no CORS headers are emitted), so this is the CSRF defense in
+lieu of a token. Every config mutation is audit-logged
+(`event=fleet-mutation`). `PUT`/`DELETE` use ETag `If-Match` for
+optimistic concurrency (412 on mismatch, 428 when required-but-absent).
+For remote access, SSH-tunnel; token-bearer auth is a future release.
+
+**Fleet config CRUD (v0.9.0+):** create with `POST`, update with `PUT`
+(GET first for the ETag), delete with `DELETE`:
+
+```bash
+# Create
+curl -X POST http://127.0.0.1:8080/api/v1/machines \
+  -H 'content-type: application/json' \
+  -d '{"mac":"58:47:ca:70:c7:c9","name":"venkat-1","boot":"debian-12"}'
+
+# Update (If-Match from the GET's ETag header)
+etag=$(curl -sI http://127.0.0.1:8080/api/v1/machines/58:47:ca:70:c7:c9 | grep -i etag | cut -d' ' -f2- | tr -d '\r')
+curl -X PUT http://127.0.0.1:8080/api/v1/machines/58:47:ca:70:c7:c9 \
+  -H 'content-type: application/json' -H "if-match: $etag" \
+  -d '{"name":"venkat-1","boot":"debian-13"}'
+
+# Delete
+curl -X DELETE http://127.0.0.1:8080/api/v1/machines/58:47:ca:70:c7:c9
+```
 
 K8s-style declarative shape was picked over POST-verbs and Hetzner's
 per-feature subtrees for tool-friendliness — PUT is idempotent so

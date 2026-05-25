@@ -3,8 +3,10 @@ package httpd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -86,6 +88,14 @@ const (
 	ErrCodeRescueUnimplemented  = "rescue_unimplemented"
 	ErrCodePendingFailed        = "pending_failed"
 	ErrCodePagingInvalid        = "paging_invalid"
+	// v0.9.0 fleet-CRUD codes.
+	ErrCodeContentType          = "content_type_unsupported"
+	ErrCodeMACExists            = "mac_exists"
+	ErrCodeBootInvalid          = "boot_invalid"
+	ErrCodeValidationFailed     = "validation_failed"
+	ErrCodePreconditionRequired = "precondition_required"
+	ErrCodePreconditionFailed   = "precondition_failed"
+	ErrCodeSaveFailed           = "save_failed"
 )
 
 // apiErrorView is the v0.9.0+ structured error response. `code` is the
@@ -228,15 +238,211 @@ func (s *Server) handleAPIGetIntent(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAPIMachine — GET /api/v1/machines/{mac}
+// v0.9.0: sets the ETag header so clients can If-Match on PUT/DELETE.
 func (s *Server) handleAPIMachine(w http.ResponseWriter, r *http.Request) {
-	if !s.apiReady(w) {
+	if !s.fleetReady(w, r) {
 		return
 	}
 	mac, p := s.apiExtractFleetMAC(w, r)
 	if mac == "" {
 		return
 	}
+	if etag, ok := s.opts.Fleet.ETag(mac); ok {
+		w.Header().Set("ETag", etag)
+	}
 	writeJSON(w, s.buildMachineView(mac, p))
+}
+
+// machineConfigBody is the JSON body for POST/PUT /api/v1/machines.
+// Mirrors the fleet.yaml per-machine fields. For POST, `mac` is taken
+// from the body; for PUT it comes from the URL path and any body `mac`
+// is ignored.
+type machineConfigBody struct {
+	MAC        string `json:"mac,omitempty"`
+	Name       string `json:"name"`
+	Boot       string `json:"boot"`
+	Preseed    string `json:"preseed,omitempty"`
+	Kickstart  string `json:"kickstart,omitempty"`
+	CloudInit  string `json:"cloud_init,omitempty"`
+	IPXEScript string `json:"ipxe_script,omitempty"`
+}
+
+// requireJSON enforces Content-Type: application/json on fleet-mutation
+// endpoints. This is the v0.9.0 CSRF defense: a cross-origin browser
+// fetch with application/json triggers a CORS preflight that fails
+// (pxe-beacon sends no CORS headers), so a malicious page can't drive
+// these mutations through the loopback gate. A form POST (which CAN go
+// cross-origin without preflight) is rejected here with 415.
+func (s *Server) requireJSON(w http.ResponseWriter, r *http.Request) bool {
+	ct := r.Header.Get("Content-Type")
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	if strings.TrimSpace(ct) != "application/json" {
+		writeAPIError(w, http.StatusUnsupportedMediaType, ErrCodeContentType,
+			"Content-Type must be application/json",
+			map[string]any{"got": r.Header.Get("Content-Type")})
+		return false
+	}
+	return true
+}
+
+// decodeMachineBody reads + strictly decodes the JSON config body.
+func decodeMachineBody(w http.ResponseWriter, r *http.Request) (machineConfigBody, bool) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 16384))
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, ErrCodeBodyInvalid, "read body: "+err.Error(), nil)
+		return machineConfigBody{}, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	var b machineConfigBody
+	if err := dec.Decode(&b); err != nil {
+		writeAPIError(w, http.StatusBadRequest, ErrCodeBodyInvalid, "decode body: "+err.Error(), nil)
+		return machineConfigBody{}, false
+	}
+	return b, true
+}
+
+// profileFromBody validates boot + resolves relative side-file paths
+// against the fleet.yaml directory (same rule as the admin form).
+func (s *Server) profileFromBody(w http.ResponseWriter, r *http.Request, b machineConfigBody) (fleet.Profile, bool) {
+	if !fleet.ValidBootTargets[b.Boot] {
+		writeAPIError(w, http.StatusBadRequest, ErrCodeBootInvalid,
+			"unknown boot target", map[string]any{"boot": b.Boot})
+		return fleet.Profile{}, false
+	}
+	resolve := func(p string) string {
+		if p == "" || filepath.IsAbs(p) {
+			return p
+		}
+		return filepath.Clean(filepath.Join(s.opts.Fleet.BaseDir(), p))
+	}
+	return fleet.Profile{
+		Name:       b.Name,
+		Boot:       b.Boot,
+		Preseed:    resolve(b.Preseed),
+		Kickstart:  resolve(b.Kickstart),
+		CloudInit:  resolve(b.CloudInit),
+		IPXEScript: resolve(b.IPXEScript),
+	}, true
+}
+
+// handleAPICreateMachine — POST /api/v1/machines
+func (s *Server) handleAPICreateMachine(w http.ResponseWriter, r *http.Request) {
+	if !s.fleetReady(w, r) || !s.requireJSON(w, r) {
+		return
+	}
+	b, ok := decodeMachineBody(w, r)
+	if !ok {
+		return
+	}
+	canon, err := fleet.CanonicalMAC(b.MAC)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, ErrCodeMACInvalid,
+			"invalid mac: "+err.Error(), map[string]any{"input": b.MAC})
+		return
+	}
+	p, ok := s.profileFromBody(w, r, b)
+	if !ok {
+		return
+	}
+	etag, err := s.opts.Fleet.CreateAndSave(fleet.Machine{MAC: canon, Profile: p})
+	if err != nil {
+		s.writeFleetMutationError(w, r, canon, "create", err)
+		return
+	}
+	s.logFleetMutation(r, canon, p.Name, "create", 201)
+	w.Header().Set("ETag", etag)
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, s.buildMachineView(canon, p))
+}
+
+// handleAPIUpdateMachine — PUT /api/v1/machines/{mac}. If-Match required.
+func (s *Server) handleAPIUpdateMachine(w http.ResponseWriter, r *http.Request) {
+	if !s.fleetReady(w, r) || !s.requireJSON(w, r) {
+		return
+	}
+	raw := r.PathValue("mac")
+	canon, err := fleet.CanonicalMAC(raw)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, ErrCodeMACInvalid,
+			"invalid mac: "+err.Error(), map[string]any{"input": raw})
+		return
+	}
+	b, ok := decodeMachineBody(w, r)
+	if !ok {
+		return
+	}
+	p, ok := s.profileFromBody(w, r, b)
+	if !ok {
+		return
+	}
+	etag, err := s.opts.Fleet.UpdateAndSave(fleet.Machine{MAC: canon, Profile: p}, r.Header.Get("If-Match"))
+	if err != nil {
+		s.writeFleetMutationError(w, r, canon, "update", err)
+		return
+	}
+	s.logFleetMutation(r, canon, p.Name, "update", 200)
+	w.Header().Set("ETag", etag)
+	writeJSON(w, s.buildMachineView(canon, p))
+}
+
+// handleAPIDeleteMachine — DELETE /api/v1/machines/{mac}. Idempotent;
+// If-Match honored when present.
+func (s *Server) handleAPIDeleteMachine(w http.ResponseWriter, r *http.Request) {
+	if !s.fleetReady(w, r) {
+		return
+	}
+	raw := r.PathValue("mac")
+	canon, err := fleet.CanonicalMAC(raw)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, ErrCodeMACInvalid,
+			"invalid mac: "+err.Error(), map[string]any{"input": raw})
+		return
+	}
+	existed, err := s.opts.Fleet.DeleteAndSave(canon, r.Header.Get("If-Match"))
+	if err != nil {
+		s.writeFleetMutationError(w, r, canon, "delete", err)
+		return
+	}
+	// Dropping a machine from the fleet should also clear any pending
+	// intent for it (same as the SIGHUP reload prune).
+	if existed && s.opts.Pending != nil {
+		s.opts.Pending.Cancel(canon)
+	}
+	s.logFleetMutation(r, canon, "", "delete", 204)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// writeFleetMutationError maps fleet sentinel errors to HTTP responses.
+func (s *Server) writeFleetMutationError(w http.ResponseWriter, r *http.Request, mac, op string, err error) {
+	switch {
+	case errors.Is(err, fleet.ErrMACExists):
+		writeAPIError(w, http.StatusConflict, ErrCodeMACExists,
+			"machine "+mac+" already exists (use PUT to update)", map[string]any{"mac": mac})
+	case errors.Is(err, fleet.ErrMACAbsent):
+		writeAPIError(w, http.StatusNotFound, ErrCodeMACNotInFleet,
+			"machine "+mac+" is not in fleet.yaml", map[string]any{"mac": mac})
+	case errors.Is(err, fleet.ErrPreconditionRequired):
+		writeAPIError(w, http.StatusPreconditionRequired, ErrCodePreconditionRequired,
+			"If-Match header required (GET the resource first for its ETag)", map[string]any{"mac": mac})
+	case errors.Is(err, fleet.ErrPreconditionFailed):
+		writeAPIError(w, http.StatusPreconditionFailed, ErrCodePreconditionFailed,
+			"If-Match does not match current ETag (resource changed; re-GET)", map[string]any{"mac": mac})
+	default:
+		// Validation, bad MAC, or Save failure.
+		s.log.Errorf("%s %s failed for %s: %v", op, r.URL.Path, mac, err)
+		writeAPIError(w, http.StatusInternalServerError, ErrCodeSaveFailed,
+			op+": "+err.Error(), nil)
+	}
+}
+
+// logFleetMutation is the structured audit line for fleet config
+// mutations (the higher bar config mutation gets in lieu of CSRF).
+func (s *Server) logFleetMutation(r *http.Request, mac, name, op string, status int) {
+	s.log.Infof("audit event=fleet-mutation op=%s target_mac=%s target_name=%q result=%d from=%s",
+		op, mac, name, status, r.RemoteAddr)
 }
 
 // defaultPageLimit caps an unbounded GET /api/v1/machines so a huge
@@ -252,7 +458,7 @@ const defaultPageLimit = 500
 // underlying ListMachines() is stably sorted, so offset paging is
 // deterministic.
 func (s *Server) handleAPIList(w http.ResponseWriter, r *http.Request) {
-	if !s.apiReady(w) {
+	if !s.fleetReady(w, r) {
 		return
 	}
 

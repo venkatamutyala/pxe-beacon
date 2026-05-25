@@ -33,6 +33,9 @@ import (
 //go:embed status.html
 var statusHTMLSrc string
 
+//go:embed openapi.yaml
+var openAPISpec []byte
+
 // Tracker is the same interface the TFTP server uses to notify the
 // proxyDHCP listener that a client has progressed.
 type Tracker interface {
@@ -205,7 +208,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /autoinstall/{mac}/meta-data", s.handleMetaData)
 	s.mux.HandleFunc("GET /autoinstall/{mac}/preseed.cfg", s.handlePreseed)
 	s.mux.HandleFunc("GET /autoinstall/{mac}/kickstart.cfg", s.handleKickstart)
-	s.mux.HandleFunc("POST /autoinstall/{mac}/done", s.handleInstallerDone)
+	// v0.9.0: /done is the cloud-init phone_home wire endpoint (kept as
+	// a permanent alias); /events is the canonical API form. Both route
+	// to the same handler.
+	s.mux.HandleFunc("POST /autoinstall/{mac}/done", s.handleInstallEvent)
+	s.mux.Handle("POST /api/v1/machines/{mac}/events", loopbackOnly(http.HandlerFunc(s.handleInstallEvent)))
 	s.mux.HandleFunc("GET /status", s.handleStatusHTML)
 	s.mux.HandleFunc("GET /status.json", s.handleStatusJSON)
 
@@ -215,6 +222,14 @@ func (s *Server) routes() {
 	// load-balancer conventions.
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
+
+	// v0.9.0: the hand-written OpenAPI 3 spec for /api/v1/*. Served
+	// read-only for SDK/Terraform-provider codegen.
+	s.mux.HandleFunc("GET /openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+		w.Header().Set("Content-Length", strconv.Itoa(len(openAPISpec)))
+		_, _ = w.Write(openAPISpec)
+	})
 	s.mux.HandleFunc("GET /assets/{target}/{file}", s.handleAsset)
 
 	// v0.8.0: K8s-style declarative boot-intent API. Hard-cut from
@@ -223,6 +238,13 @@ func (s *Server) routes() {
 	// Terraform / Ansible / React Query map cleanly.
 	s.mux.Handle("PUT /api/v1/machines/{mac}/intent", loopbackOnly(http.HandlerFunc(s.handleAPISetIntent)))
 	s.mux.Handle("GET /api/v1/machines/{mac}/intent", loopbackOnly(http.HandlerFunc(s.handleAPIGetIntent)))
+	// v0.9.0: fleet-config CRUD. The JSON API is now the single
+	// mutation control plane; the /admin HTML page is a fetch() client
+	// of these. Loopback-only + Content-Type: application/json (the
+	// CSRF defense) + audit logging, in lieu of a CSRF token.
+	s.mux.Handle("POST /api/v1/machines", loopbackOnly(http.HandlerFunc(s.handleAPICreateMachine)))
+	s.mux.Handle("PUT /api/v1/machines/{mac}", loopbackOnly(http.HandlerFunc(s.handleAPIUpdateMachine)))
+	s.mux.Handle("DELETE /api/v1/machines/{mac}", loopbackOnly(http.HandlerFunc(s.handleAPIDeleteMachine)))
 	s.mux.Handle("GET /api/v1/machines/{mac}", loopbackOnly(http.HandlerFunc(s.handleAPIMachine)))
 	s.mux.Handle("GET /api/v1/machines", loopbackOnly(http.HandlerFunc(s.handleAPIList)))
 
@@ -247,8 +269,9 @@ func (s *Server) routes() {
 	// "defaults/debian-preseed.cfg".
 	s.mux.Handle("GET /admin", loopbackOnly(http.HandlerFunc(s.handleAdminIndex)))
 	s.mux.Handle("GET /admin/templates/{name...}", loopbackOnly(http.HandlerFunc(s.handleAdminTemplateView)))
-	s.mux.Handle("POST /admin/fleet", loopbackOnly(http.HandlerFunc(s.csrfGuard(s.handleAdminFleetSave))))
-	s.mux.Handle("POST /admin/fleet/delete", loopbackOnly(http.HandlerFunc(s.csrfGuard(s.handleAdminFleetDelete))))
+	// v0.9.0: fleet CRUD moved to the JSON API (POST/PUT/DELETE
+	// /api/v1/machines). The /admin page is now a fetch() client of
+	// those; the old form-encoded /admin/fleet routes are gone.
 	s.mux.Handle("POST /admin/templates-reset/{name...}", loopbackOnly(http.HandlerFunc(s.csrfGuard(s.handleAdminTemplateReset))))
 	s.mux.Handle("POST /admin/templates/{name...}", loopbackOnly(http.HandlerFunc(s.csrfGuard(s.handleAdminTemplateSave))))
 	s.mux.Handle("POST /admin/reload", loopbackOnly(http.HandlerFunc(s.csrfGuard(s.handleAdminReload))))
@@ -655,12 +678,34 @@ func (s *Server) handleMetaData(w http.ResponseWriter, r *http.Request) {
 	s.log.Infof("GET %s -> 200, %d bytes [client=%s]", r.URL.Path, len(body), labelOf(p.Name, mac))
 }
 
-// handleInstallerDone is the cloud-init phone_home callback. Once
-// hit, the machine transitions to "installer-done" in the status
-// tracker, and a pending INSTALL action is cancelled (v0.8.1+:
-// rescue is preserved so a stale phone_home from a previous install
-// can't silently clear an operator's freshly-queued rescue session).
-func (s *Server) handleInstallerDone(w http.ResponseWriter, r *http.Request) {
+// notePhase records an install-lifecycle phase and adjusts pending
+// intent. Shared by the two routes that report observed state:
+//
+//	POST /autoinstall/{mac}/done            (cloud-init phone_home; legacy alias)
+//	POST /api/v1/machines/{mac}/events       (v0.9.0 canonical)
+//
+//	installer-done   → cancel a pending INSTALL (keep rescue — a stale
+//	                   phone_home from a prior install must not clear a
+//	                   freshly-queued rescue).
+//	installer-failed → KEEP pending intact: the operator wants a retry
+//	                   to re-PXE; cancelling would strand a half-installed
+//	                   box on local disk.
+func (s *Server) notePhase(mac string, phase fleet.Event) {
+	s.opts.FleetStatus.Note(mac, phase)
+	if phase == fleet.EventInstallerDone && s.opts.Pending != nil {
+		if action, _, _, ok := s.opts.Pending.Status(mac); ok && action == pending.ActionInstall {
+			s.opts.Pending.Cancel(mac)
+		}
+	}
+}
+
+// handleInstallEvent serves BOTH POST /autoinstall/{mac}/done (the
+// cloud-init phone_home wire endpoint — form-encoded, no `phase`,
+// defaults to installer-done) AND POST /api/v1/machines/{mac}/events
+// (JSON or form, explicit `phase`). The success response is
+// content-negotiated: plain "ok" for cloud-init, the machine view for
+// API clients. v0.9.0+.
+func (s *Server) handleInstallEvent(w http.ResponseWriter, r *http.Request) {
 	if !s.fleetReady(w, r) {
 		return
 	}
@@ -669,22 +714,54 @@ func (s *Server) handleInstallerDone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := s.opts.Fleet.Lookup(mac)
-	s.opts.FleetStatus.Note(mac, fleet.EventInstallerDone)
-	// v0.8.1: only cancel install. Rescue intents are operator-driven
-	// and orthogonal to install completion; preserving them prevents
-	// a stale cloud-init phone_home (from a previous install) from
-	// silently clearing a fresh rescue queued by the operator.
-	if s.opts.Pending != nil {
-		action, _, _, ok := s.opts.Pending.Status(mac)
-		if ok && action == pending.ActionInstall {
-			s.opts.Pending.Cancel(mac)
-		}
+
+	phase, reason := parseEventPhase(r)
+	var ev fleet.Event
+	switch phase {
+	case "", "installer-done", "done":
+		ev = fleet.EventInstallerDone
+	case "installer-failed", "failed":
+		ev = fleet.EventInstallerFailed
+	default:
+		s.writeError(w, r, http.StatusBadRequest, ErrCodeActionInvalid,
+			`phase must be "installer-done" or "installer-failed"`,
+			map[string]any{"got": phase})
+		return
+	}
+	s.notePhase(mac, ev)
+	s.log.Infof("audit event=install-event phase=%s reason=%q target_mac=%s target_name=%q from=%s",
+		ev, reason, mac, p.Name, r.RemoteAddr)
+
+	if wantsJSON(r) {
+		writeJSON(w, s.buildMachineView(mac, p))
+		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	body := "ok\n"
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	_, _ = io.WriteString(w, body)
-	s.log.Infof("POST %s -> 200, phone_home received [client=%s]", r.URL.Path, labelOf(p.Name, mac))
+}
+
+// parseEventPhase pulls the optional phase + reason from either a JSON
+// body or a form-encoded body (cloud-init phone_home posts form data
+// with no phase field — that's the empty-phase = installer-done case).
+func parseEventPhase(r *http.Request) (phase, reason string) {
+	ct := r.Header.Get("Content-Type")
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	if strings.TrimSpace(ct) == "application/json" {
+		var body struct {
+			Phase  string `json:"phase"`
+			Reason string `json:"reason"`
+		}
+		raw, _ := io.ReadAll(io.LimitReader(r.Body, 8192))
+		_ = json.Unmarshal(raw, &body)
+		return body.Phase, body.Reason
+	}
+	// Form-encoded (cloud-init) or anything else: best-effort form parse.
+	_ = r.ParseForm()
+	return r.FormValue("phase"), r.FormValue("reason")
 }
 
 // handleAsset serves a file from DataDir/<target>/<file>. The target

@@ -113,7 +113,14 @@ type machineYAML struct {
 // Fleet is the live in-memory store. It satisfies the lookup
 // interface proxydhcp + tftp + httpd consume.
 type Fleet struct {
-	mu       sync.RWMutex
+	mu sync.RWMutex
+	// saveMu serializes the v0.9.0 transactional CRUD methods
+	// (Create/Update/DeleteAndSave) so a compare→mutate→persist
+	// sequence is atomic against other writers AND against a SIGHUP
+	// reload. It is held ACROSS f.mu acquisitions, never the reverse;
+	// f.mu nests inside saveMu. Plain reads (Lookup, Machines) take
+	// only f.mu and don't touch saveMu.
+	saveMu   sync.Mutex
 	path     string             // path to fleet.yaml; empty for Empty()
 	baseDir  string             // directory of path (for resolving relative cloud_init / ipxe_script)
 	machines map[string]Profile // canonical-MAC → resolved Profile
@@ -154,10 +161,17 @@ func Load(path string, log *narrlog.Logger) (*Fleet, error) {
 
 // Reload re-reads the underlying file. Safe to call concurrently with
 // Lookup — writers hold the write lock, readers hold the read lock.
+//
+// v0.9.0: takes saveMu so a reload is mutually exclusive with the
+// transactional CRUD methods. Without this a reload could land between
+// a transaction's map mutation and its Save(), reverting the change in
+// memory while Save persisted the reverted map (silent lost update).
 func (f *Fleet) Reload() error {
 	if f.path == "" {
 		return errors.New("fleet: Reload on Empty fleet (no -config)")
 	}
+	f.saveMu.Lock()
+	defer f.saveMu.Unlock()
 	return f.reload()
 }
 

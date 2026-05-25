@@ -1,0 +1,229 @@
+openapi: 3.1.0
+info:
+  title: pxe-beacon API
+  description: >
+    REST API for pxe-beacon, a single-binary proxyDHCP + TFTP + HTTP PXE
+    installer. Covers fleet machine config (CRUD), declarative boot
+    intent, install-lifecycle events, and health probes.
+
+    All endpoints are loopback-only. Mutation endpoints
+    (POST/PUT/DELETE) require `Content-Type: application/json` — this is
+    the CSRF defense (a cross-origin browser can't send that without a
+    failing CORS preflight) in lieu of a CSRF token.
+
+    Errors use a structured envelope `{code, message, details?}`.
+    Branch on `code` (stable); `message` prose may be reworded.
+  version: "0.9.0"
+servers:
+  - url: http://localhost:8080
+    description: loopback (default)
+paths:
+  /api/v1/machines:
+    get:
+      summary: List fleet machines (paginated)
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 500, maximum: 500 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0, minimum: 0 } }
+      responses:
+        "200":
+          description: machine list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+                  pending_ttl_s: { type: integer }
+                  machines:
+                    type: array
+                    items: { $ref: "#/components/schemas/Machine" }
+        "400": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Create a fleet machine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MachineConfig" }
+      responses:
+        "201":
+          description: created
+          headers:
+            ETag: { schema: { type: string }, description: weak entity tag for If-Match }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Machine" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/v1/machines/{mac}:
+    parameters:
+      - { name: mac, in: path, required: true, schema: { type: string }, description: "MAC (colon or hyphen form)" }
+    get:
+      summary: Get one machine
+      responses:
+        "200":
+          description: machine
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Machine" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+    put:
+      summary: Update a machine (If-Match required)
+      parameters:
+        - { name: If-Match, in: header, required: true, schema: { type: string }, description: "ETag from a prior GET" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MachineConfig" }
+      responses:
+        "200":
+          description: updated
+          headers: { ETag: { schema: { type: string } } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Machine" }
+        "404": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+        "428": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete a machine (idempotent; If-Match honored if present)
+      parameters:
+        - { name: If-Match, in: header, required: false, schema: { type: string } }
+      responses:
+        "204": { description: deleted (or already absent) }
+        "412": { $ref: "#/components/responses/Error" }
+  /api/v1/machines/{mac}/intent:
+    parameters:
+      - { name: mac, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Get desired boot intent + observed state
+      responses:
+        "200":
+          description: intent
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Intent" }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      summary: Set desired boot intent (idempotent)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: [string, "null"]
+                  enum: ["install", "rescue", null]
+      responses:
+        "200":
+          description: intent set/cleared
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Intent" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "501": { $ref: "#/components/responses/Error" }
+  /api/v1/machines/{mac}/events:
+    parameters:
+      - { name: mac, in: path, required: true, schema: { type: string } }
+    post:
+      summary: Report an install-lifecycle event
+      description: >
+        Accepts JSON or form-encoded (cloud-init phone_home). The
+        legacy alias POST /autoinstall/{mac}/done routes here too.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                phase: { type: string, enum: ["installer-done", "installer-failed"] }
+                reason: { type: string }
+      responses:
+        "200":
+          description: recorded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Machine" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /healthz:
+    get:
+      summary: Liveness probe
+      responses:
+        "200": { description: alive }
+  /readyz:
+    get:
+      summary: Readiness probe
+      responses:
+        "200": { description: ready }
+        "503": { description: not ready (a subsystem isn't wired) }
+components:
+  schemas:
+    Desired:
+      type: object
+      properties:
+        action: { type: string, enum: ["install", "rescue", ""] }
+        requested_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+    Observed:
+      type: object
+      properties:
+        phase: { type: string }
+        last_seen: { type: string, format: date-time }
+    Machine:
+      type: object
+      properties:
+        mac: { type: string }
+        name: { type: string }
+        boot: { type: string }
+        desired: { $ref: "#/components/schemas/Desired" }
+        observed: { $ref: "#/components/schemas/Observed" }
+    Intent:
+      type: object
+      properties:
+        mac: { type: string }
+        desired: { $ref: "#/components/schemas/Desired" }
+        observed: { $ref: "#/components/schemas/Observed" }
+    MachineConfig:
+      type: object
+      required: [boot]
+      properties:
+        mac: { type: string, description: "required for POST; ignored on PUT (path wins)" }
+        name: { type: string }
+        boot:
+          type: string
+          enum: ["menu", "debian-12", "debian-13", "ubuntu-22.04", "ubuntu-24.04", "rocky-9", "alma-9", "custom"]
+        preseed: { type: string }
+        kickstart: { type: string }
+        cloud_init: { type: string }
+        ipxe_script: { type: string }
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: stable machine-readable identifier
+        message: { type: string }
+        details: { type: object, additionalProperties: true }
+  responses:
+    Error:
+      description: structured error envelope
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }

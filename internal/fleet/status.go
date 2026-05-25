@@ -16,10 +16,18 @@ const (
 	EventIPXEDHCP        Event = "ipxe-dhcp"
 	EventUserDataFetched Event = "user-data-fetched"
 	EventInstallerDone   Event = "installer-done"
+	// EventInstallerFailed (v0.9.0+) is reported by an agent via
+	// POST /api/v1/machines/{mac}/events {"phase":"installer-failed"}.
+	// Deliberately NOT in eventOrder — failure is not a forward rung
+	// on the monotonic progress ladder. Note() special-cases it so it
+	// always wins the State slot (terminal), and isStalled treats it
+	// as not-stalled (it's a terminal state, not a hang).
+	EventInstallerFailed Event = "installer-failed"
 )
 
 // Order defines the canonical progression order for events. Used to
 // compute "have we gone backwards" and to label the latest stage.
+// EventInstallerFailed is intentionally absent (rank 0) — see Note().
 var eventOrder = map[Event]int{
 	EventFirmwareDHCP:    1,
 	EventFirmwareFetched: 2,
@@ -96,7 +104,10 @@ func (t *Tracker) Note(mac string, ev Event) {
 	}
 	// Only advance the state if this event is at-or-past the
 	// current one (avoids regressing on out-of-order packets).
-	if rank(ev) >= rank(s.State) {
+	// EventInstallerFailed is special: it's terminal and not on the
+	// monotonic ladder (rank 0), so force it into the State slot
+	// rather than letting the rank check drop it.
+	if ev == EventInstallerFailed || rank(ev) >= rank(s.State) {
 		s.State = ev
 	}
 	// Append to event history if it's not a duplicate of the last
@@ -187,7 +198,9 @@ func (t *Tracker) Snapshot() []Status {
 }
 
 func isStalled(s Status, cutoff time.Time) bool {
-	if s.State == "" || s.State == EventInstallerDone {
+	// "" (pending), installer-done, and installer-failed are all
+	// terminal/at-rest states, not hangs — never stalled.
+	if s.State == "" || s.State == EventInstallerDone || s.State == EventInstallerFailed {
 		return false
 	}
 	if s.LastSeen.IsZero() {

@@ -86,11 +86,7 @@
       <td>{{if .Profile.CloudInit}}{{.Profile.CloudInit}}{{else}}<span class="mac">(default)</span>{{end}}</td>
       <td>{{if .Profile.IPXEScript}}{{.Profile.IPXEScript}}{{else}}—{{end}}</td>
       <td class="actions">
-        <form method="POST" action="/admin/fleet/delete" onsubmit="return confirm('Delete {{.Profile.Name}} ({{.MAC}})?');">
-          <input type="hidden" name="csrf" value="{{$.CSRF}}">
-          <input type="hidden" name="mac" value="{{.MAC}}">
-          <button type="submit" class="danger">delete</button>
-        </form>
+        <button type="button" class="danger" data-delete data-mac="{{.MAC}}" data-name="{{.Profile.Name}}">delete</button>
       </td>
     </tr>
   {{else}}
@@ -172,12 +168,64 @@ document.querySelectorAll('tr[data-mac] button[data-intent]').forEach(btn => {
 });
 refreshPendingRows();
 setInterval(refreshPendingRows, 5000);
+
+// v0.9.0: fleet CRUD via the JSON API. The admin page is now a client
+// of /api/v1/machines — same control plane as Terraform/curl. No CSRF
+// token: the endpoints require Content-Type: application/json, which a
+// cross-origin browser can't send without a (failing) CORS preflight.
+function apiErr(res, fallbackVerb) {
+  return res.json().then(e => (e && e.message) || res.statusText).catch(() => res.statusText)
+    .then(m => alert(fallbackVerb + ' failed: ' + m));
+}
+
+document.querySelectorAll('button[data-delete]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    if (!confirm('Delete ' + btn.dataset.name + ' (' + btn.dataset.mac + ')?')) return;
+    btn.disabled = true;
+    const res = await fetch('/api/v1/machines/' + encodeURIComponent(btn.dataset.mac), {method: 'DELETE'});
+    if (res.ok) { location.reload(); return; }
+    await apiErr(res, 'delete');
+    btn.disabled = false;
+  });
+});
+
+document.getElementById('save-machine').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const get = id => document.getElementById(id).value.trim();
+  const mac = get('mac');
+  const payload = {
+    mac,
+    name: get('name'),
+    boot: document.getElementById('boot').value,
+    preseed: get('preseed'),
+    kickstart: get('kickstart'),
+    cloud_init: get('cloud_init'),
+    ipxe_script: get('ipxe_script'),
+  };
+  // Probe existence to choose create (POST) vs update (PUT+If-Match).
+  const probe = await fetch('/api/v1/machines/' + encodeURIComponent(mac));
+  let res;
+  if (probe.status === 200) {
+    const etag = probe.headers.get('ETag') || '';
+    res = await fetch('/api/v1/machines/' + encodeURIComponent(mac), {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json', 'If-Match': etag},
+      body: JSON.stringify(payload),
+    });
+  } else {
+    res = await fetch('/api/v1/machines', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+  }
+  if (res.ok) { location.reload(); return; }
+  await apiErr(res, 'save');
+});
 </script>
 
 <h2>add or update a machine</h2>
-<form class="machine" method="POST" action="/admin/fleet">
-  <input type="hidden" name="csrf" value="{{.CSRF}}">
-
+<form class="machine" id="save-machine">
   <label for="mac">mac</label>
   <input id="mac" name="mac" type="text" placeholder="58:47:ca:70:c7:c9" required>
 

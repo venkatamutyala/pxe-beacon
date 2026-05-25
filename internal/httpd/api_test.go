@@ -13,6 +13,7 @@ import (
 	"github.com/venkatamutyala/pxe-beacon/internal/fleet"
 	"github.com/venkatamutyala/pxe-beacon/internal/narrlog"
 	"github.com/venkatamutyala/pxe-beacon/internal/pending"
+	"gopkg.in/yaml.v3"
 )
 
 func newAPIServer(t *testing.T) (*Server, *pending.Store, *fleet.Fleet) {
@@ -415,6 +416,185 @@ func TestAPI_NonLoopback_403(t *testing.T) {
 	srv.mux.ServeHTTP(w, req)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("non-loopback: want 403, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestOpenAPISpec_ParsesAndCoversSurface(t *testing.T) {
+	// The embedded spec must be valid YAML with the right top-level
+	// shape, and document exactly the /api/v1 paths we serve. The
+	// second half is the "added an endpoint, forgot to document it"
+	// (and vice versa) guard.
+	var doc struct {
+		OpenAPI string                   `yaml:"openapi"`
+		Info    struct{ Version string } `yaml:"info"`
+		Paths   map[string]any           `yaml:"paths"`
+	}
+	if err := yaml.Unmarshal(openAPISpec, &doc); err != nil {
+		t.Fatalf("openapi.yaml is not valid YAML: %v", err)
+	}
+	if doc.OpenAPI == "" {
+		t.Error("openapi version missing")
+	}
+	if doc.Info.Version == "" {
+		t.Error("info.version missing")
+	}
+
+	documented := map[string]bool{}
+	for p := range doc.Paths {
+		if strings.HasPrefix(p, "/api/v1/") {
+			documented[p] = true
+		}
+	}
+	want := map[string]bool{
+		"/api/v1/machines":              true,
+		"/api/v1/machines/{mac}":        true,
+		"/api/v1/machines/{mac}/intent": true,
+		"/api/v1/machines/{mac}/events": true,
+	}
+	for p := range want {
+		if !documented[p] {
+			t.Errorf("spec missing documented path %q", p)
+		}
+	}
+	for p := range documented {
+		if !want[p] {
+			t.Errorf("spec documents unexpected path %q (update test or spec)", p)
+		}
+	}
+}
+
+func TestOpenAPISpec_Served(t *testing.T) {
+	srv, _, _ := newAPIServer(t)
+	w := doLoopback(srv, "GET", "/openapi.yaml", "")
+	if w.Code != 200 {
+		t.Fatalf("/openapi.yaml: status %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "yaml") {
+		t.Errorf("content-type = %q, want yaml", ct)
+	}
+	if !strings.Contains(w.Body.String(), "openapi:") {
+		t.Error("served spec doesn't look like OpenAPI")
+	}
+}
+
+func TestAPI_CRUD_FullCycle(t *testing.T) {
+	srv, _, _ := newAPIServer(t)
+	newMAC := "aa:bb:cc:dd:ee:09"
+
+	// CREATE
+	w := doLoopback(srv, "POST", "/api/v1/machines",
+		`{"mac":"`+newMAC+`","name":"node9","boot":"debian-12"}`)
+	if w.Code != 201 {
+		t.Fatalf("create: status %d body=%s", w.Code, w.Body.String())
+	}
+	etag := w.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("create should set ETag header")
+	}
+
+	// CREATE again → 409 mac_exists
+	w = doLoopback(srv, "POST", "/api/v1/machines",
+		`{"mac":"`+newMAC+`","name":"dup","boot":"debian-12"}`)
+	if w.Code != 409 {
+		t.Fatalf("re-create: want 409, got %d", w.Code)
+	}
+	var ev apiErrorView
+	decode(t, w, &ev)
+	if ev.Code != ErrCodeMACExists {
+		t.Errorf("code = %q, want %q", ev.Code, ErrCodeMACExists)
+	}
+
+	// UPDATE without If-Match → 428
+	w = doLoopback(srv, "PUT", "/api/v1/machines/"+newMAC,
+		`{"name":"node9b","boot":"debian-13"}`)
+	if w.Code != 428 {
+		t.Fatalf("update w/o If-Match: want 428, got %d", w.Code)
+	}
+
+	// UPDATE with stale If-Match → 412
+	reqStale := httptest.NewRequest("PUT", "/api/v1/machines/"+newMAC,
+		strings.NewReader(`{"name":"node9b","boot":"debian-13"}`))
+	reqStale.Header.Set("Content-Type", "application/json")
+	reqStale.Header.Set("If-Match", `W/"stale"`)
+	reqStale.RemoteAddr = "127.0.0.1:5"
+	wr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(wr, reqStale)
+	if wr.Code != 412 {
+		t.Fatalf("update stale If-Match: want 412, got %d", wr.Code)
+	}
+
+	// UPDATE with correct If-Match → 200, new ETag
+	reqOK := httptest.NewRequest("PUT", "/api/v1/machines/"+newMAC,
+		strings.NewReader(`{"name":"node9b","boot":"debian-13"}`))
+	reqOK.Header.Set("Content-Type", "application/json")
+	reqOK.Header.Set("If-Match", etag)
+	reqOK.RemoteAddr = "127.0.0.1:5"
+	wr = httptest.NewRecorder()
+	srv.mux.ServeHTTP(wr, reqOK)
+	if wr.Code != 200 {
+		t.Fatalf("update correct If-Match: want 200, got %d body=%s", wr.Code, wr.Body.String())
+	}
+
+	// DELETE (idempotent) → 204, then 204 again
+	w = doLoopback(srv, "DELETE", "/api/v1/machines/"+newMAC, "")
+	if w.Code != 204 {
+		t.Fatalf("delete: want 204, got %d", w.Code)
+	}
+	w = doLoopback(srv, "DELETE", "/api/v1/machines/"+newMAC, "")
+	if w.Code != 204 {
+		t.Fatalf("delete again (idempotent): want 204, got %d", w.Code)
+	}
+}
+
+func TestAPI_CreateMachine_RejectsNonJSON(t *testing.T) {
+	srv, _, _ := newAPIServer(t)
+	// Form-encoded body → 415 (the CSRF defense).
+	req := httptest.NewRequest("POST", "/api/v1/machines",
+		strings.NewReader("mac=aa:bb:cc:dd:ee:09&name=x&boot=debian-12"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "127.0.0.1:5"
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+	if w.Code != 415 {
+		t.Fatalf("non-JSON: want 415, got %d", w.Code)
+	}
+	var ev apiErrorView
+	decode(t, w, &ev)
+	if ev.Code != ErrCodeContentType {
+		t.Errorf("code = %q, want %q", ev.Code, ErrCodeContentType)
+	}
+}
+
+func TestAPI_Events_FailedKeepsPending(t *testing.T) {
+	srv, pSt, _ := newAPIServer(t)
+	mac := "58:47:ca:70:c7:c9"
+	if _, err := pSt.Install(mac); err != nil {
+		t.Fatal(err)
+	}
+	// installer-failed must NOT cancel the pending install (retry).
+	w := doLoopback(srv, "POST", "/api/v1/machines/"+mac+"/events",
+		`{"phase":"installer-failed","reason":"disk error"}`)
+	if w.Code != 200 {
+		t.Fatalf("events failed: status %d body=%s", w.Code, w.Body.String())
+	}
+	if !pSt.IsPending(mac) {
+		t.Fatal("installer-failed must keep pending intent for retry")
+	}
+}
+
+func TestAPI_Events_DoneCancelsInstall(t *testing.T) {
+	srv, pSt, _ := newAPIServer(t)
+	mac := "58:47:ca:70:c7:c9"
+	if _, err := pSt.Install(mac); err != nil {
+		t.Fatal(err)
+	}
+	w := doLoopback(srv, "POST", "/api/v1/machines/"+mac+"/events",
+		`{"phase":"installer-done"}`)
+	if w.Code != 200 {
+		t.Fatalf("events done: status %d", w.Code)
+	}
+	if pSt.IsPending(mac) {
+		t.Fatal("installer-done should cancel pending install")
 	}
 }
 

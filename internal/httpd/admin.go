@@ -129,84 +129,13 @@ func (s *Server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleAdminFleetSave handles POST /admin/fleet — add or update a
-// machine entry. Writes fleet.yaml on success.
-func (s *Server) handleAdminFleetSave(w http.ResponseWriter, r *http.Request) {
-	if !s.fleetReady(w, r) {
-		return
-	}
-	mac := strings.TrimSpace(r.FormValue("mac"))
-	name := strings.TrimSpace(r.FormValue("name"))
-	boot := strings.TrimSpace(r.FormValue("boot"))
-	preseed := strings.TrimSpace(r.FormValue("preseed"))
-	kickstart := strings.TrimSpace(r.FormValue("kickstart"))
-	cloudInit := strings.TrimSpace(r.FormValue("cloud_init"))
-	ipxeScript := strings.TrimSpace(r.FormValue("ipxe_script"))
-
-	canon, err := fleet.CanonicalMAC(mac)
-	if err != nil {
-		redirectFlash(w, r, "err", fmt.Sprintf("invalid MAC: %v", err))
-		return
-	}
-	if !fleet.ValidBootTargets[boot] {
-		redirectFlash(w, r, "err", fmt.Sprintf("unknown boot target %q", boot))
-		return
-	}
-	resolvePath := func(p string) string {
-		if p == "" {
-			return ""
-		}
-		if filepath.IsAbs(p) {
-			return p
-		}
-		// Resolve relative to fleet.yaml directory.
-		return filepath.Clean(filepath.Join(s.opts.Fleet.BaseDir(), p))
-	}
-	m := fleet.Machine{
-		MAC: canon,
-		Profile: fleet.Profile{
-			Name:       name,
-			Boot:       boot,
-			Preseed:    resolvePath(preseed),
-			Kickstart:  resolvePath(kickstart),
-			CloudInit:  resolvePath(cloudInit),
-			IPXEScript: resolvePath(ipxeScript),
-		},
-	}
-	if err := s.opts.Fleet.AddOrUpdate(m); err != nil {
-		redirectFlash(w, r, "err", fmt.Sprintf("validation failed: %v", err))
-		return
-	}
-	if err := s.opts.Fleet.Save(); err != nil {
-		redirectFlash(w, r, "err", fmt.Sprintf("save fleet.yaml: %v", err))
-		return
-	}
-	s.log.Infof("admin: saved machine %s (%s, boot=%s)", name, canon, boot)
-	redirectFlash(w, r, "ok", fmt.Sprintf("saved %s (%s)", name, canon))
-}
-
-// handleAdminFleetDelete handles POST /admin/fleet/delete.
-func (s *Server) handleAdminFleetDelete(w http.ResponseWriter, r *http.Request) {
-	if !s.fleetReady(w, r) {
-		return
-	}
-	mac := strings.TrimSpace(r.FormValue("mac"))
-	removed, err := s.opts.Fleet.Remove(mac)
-	if err != nil {
-		redirectFlash(w, r, "err", fmt.Sprintf("delete: %v", err))
-		return
-	}
-	if !removed {
-		redirectFlash(w, r, "err", fmt.Sprintf("not found: %s", mac))
-		return
-	}
-	if err := s.opts.Fleet.Save(); err != nil {
-		redirectFlash(w, r, "err", fmt.Sprintf("save fleet.yaml: %v", err))
-		return
-	}
-	s.log.Infof("admin: deleted machine %s", mac)
-	redirectFlash(w, r, "ok", fmt.Sprintf("deleted %s", mac))
-}
+// v0.9.0: fleet CRUD (add/update/delete) moved to the JSON API —
+// POST/PUT/DELETE /api/v1/machines in api.go. The /admin page is now a
+// fetch() client of those endpoints. The old form-encoded
+// handleAdminFleetSave / handleAdminFleetDelete handlers were removed;
+// the transactional Fleet.CreateAndSave / UpdateAndSave / DeleteAndSave
+// methods (txn.go) are the single mutation path, with rollback on Save
+// failure and If-Match optimistic concurrency.
 
 // handleAdminTemplateView handles GET /admin/templates/{name}.
 // Name in the URL is the relative path under scripts/ — e.g.

@@ -787,59 +787,54 @@ func TestHTTP_Admin_IndexRendersHTML(t *testing.T) {
 	}
 }
 
-func TestHTTP_Admin_FleetSave_WritesYAML(t *testing.T) {
+// v0.9.0: fleet CRUD moved to POST /api/v1/machines (JSON). This test
+// replaces the old form-encoded /admin/fleet WritesYAML test.
+func TestHTTP_API_CreateMachine_WritesYAML(t *testing.T) {
 	addr, fleetPath, _ := startFleetServerWithAdminData(t)
 
-	// Pull a CSRF token from the admin page.
-	csrf := fetchCSRF(t, "http://"+addr+"/admin")
-
-	form := url.Values{
-		"csrf": {csrf},
-		"mac":  {"58:47:ca:70:c7:c9"},
-		"name": {"venkat-1"},
-		"boot": {"debian-12"},
-	}
-	resp, err := http.PostForm("http://"+addr+"/admin/fleet", form)
+	body := `{"mac":"58:47:ca:70:c7:c9","name":"venkat-1","boot":"debian-12"}`
+	resp, err := http.Post("http://"+addr+"/api/v1/machines", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusSeeOther && resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 201. body=%s", resp.StatusCode, b)
+	}
+	if resp.Header.Get("ETag") == "" {
+		t.Error("create response should carry an ETag")
 	}
 
-	// fleet.yaml on disk should now contain the entry.
 	raw, err := os.ReadFile(fleetPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{
-		"58:47:ca:70:c7:c9",
-		"venkat-1",
-		"debian-12",
-	} {
+	for _, want := range []string{"58:47:ca:70:c7:c9", "venkat-1", "debian-12"} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("written fleet.yaml missing %q:\n%s", want, raw)
 		}
 	}
 }
 
-func TestHTTP_Admin_RejectsCSRFMismatch(t *testing.T) {
+// v0.9.0: the fleet-mutation CSRF defense is Content-Type enforcement,
+// not a token. A form-encoded POST (which a cross-origin browser CAN
+// send without a preflight) must be rejected with 415. Replaces the
+// old TestHTTP_Admin_RejectsCSRFMismatch.
+func TestHTTP_API_CreateMachine_RejectsNonJSON(t *testing.T) {
 	addr, _, _ := startFleetServerWithAdminData(t)
 	form := url.Values{
-		"csrf": {"bogus"},
 		"mac":  {"58:47:ca:70:c7:c9"},
 		"name": {"x"},
 		"boot": {"debian-12"},
 	}
-	resp, err := http.PostForm("http://"+addr+"/admin/fleet", form)
+	resp, err := http.PostForm("http://"+addr+"/api/v1/machines", form)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("status = %d, want 403 (csrf mismatch)", resp.StatusCode)
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Errorf("status = %d, want 415 (non-JSON content-type)", resp.StatusCode)
 	}
 }
 
