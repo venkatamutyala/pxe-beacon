@@ -4,10 +4,21 @@ Living document. Updated as releases ship.
 
 ## Where we are
 
-**v0.8.1 shipped** (current).
-Closed the safety footguns from v0.8.0: already-installed guard, listener
-races, ARM64 hard-refuse, rescue 501, audit logging. K8s-style declarative
-`PUT /api/v1/machines/{mac}/intent` is the stable boot-intent contract.
+**v0.9.0 shipped** (current) — "API as a contract".
+The JSON API is now the single mutation control plane: fleet CRUD
+(POST/PUT/DELETE `/api/v1/machines`), `/events` install-lifecycle
+reporting, ETag/If-Match optimistic concurrency, structured error
+envelope, pagination, `/healthz`+`/readyz`, and a hand-written OpenAPI
+3 spec at `/openapi.yaml`. `/admin` is a fetch() client of the same
+endpoints; mutations require `Content-Type: application/json` (CSRF
+defense) + audit logging.
+
+Prior: **v0.8.1** closed the safety footguns (already-installed guard,
+listener races, ARM64 hard-refuse, rescue 501, audit logging).
+**v0.8.0** shipped the K8s-style declarative `PUT /intent` contract.
+
+**Decision (2026-05-25):** BMC integration + `POST /power` deferred to
+an unscheduled future iteration. Everything below excludes it.
 
 ## Cross-release principles
 
@@ -28,40 +39,44 @@ These apply to every PR until further notice:
 
 ---
 
-## v0.8.2 — "Power and parameters" (features)
+## Next: "Config, rescue, packaging" (features)
 
-**Theme:** Un-stub everything v0.8.1 promised. Ship the BMC + rescue + templating story the panel kept asking about.
-**Estimate:** 2–3 weeks.
-**Headline:** "Per-machine config, real rescue, remote power."
+**Theme:** Per-machine config + real rescue + the security/packaging
+basics. BMC/power removed (deferred). The v0.8.2 quick-win bugfixes
+(404→503, encode-error, etc.) already shipped inside v0.9.0.
+**Estimate:** ~2 weeks.
+**Headline:** "Per-machine config, real rescue, tokens, container."
 
 ### Items
 
 | # | Item | Why | Effort |
 |---|---|---|---|
-| 1 | **`params:` map in `machineYAML`** + Go template substitution into preseed / cloud-init / kickstart | Foreman expert's #1 ask. Today N machines with N hostnames = N preseed copies. One map, one merge. | small |
-| 2 | **Real SystemRescue rescue boot target** in `dispatch.go` + un-501 the API | One global arm (rescue isn't per-machine). Use SystemRescue HTTP mirror, `archisobasedir=sysresccd` cmdline. | small |
-| 3 | **`bmc:` schema in `machineYAML`** (`address`, `protocol`, `username`, `password_env`, `insecure_tls`) | DC engineer's foundation. Pointer struct so absent = nil = no BMC. Validated at `validateProfile`. | small |
-| 4 | **`POST /api/v1/machines/{mac}/power`** — real, Redfish vocabulary | Body: `{"reset_type":"ForceRestart"\|"GracefulRestart"\|"PowerCycle"\|"On"\|"ForceOff"\|"GracefulShutdown"}`. Returns **202 + status URL**. **Per-BMC mutex** to respect iLO's ~5-conn cap. Pass-through to BMC; surface BMC's error verbatim. | medium |
-| 5 | **Bootstrap tokens for `/autoinstall/{mac}/done`** | HMAC-derived from server secret (`HMAC-SHA256(serverSecret, mac \|\| requestedAt-truncated-to-15min)`). Survives restart, no on-disk state, naturally TTL-bound. Templated into cloud-init via `phone_home.url: .../done?t=<token>`. Validated via constant-time compare. Mismatch → 403, no state change. | medium |
-| 6 | **`POST /autoinstall/{mac}/log` capture endpoint** | DC's missing-diagnostic gap. Cloud-init `runcmd` posts kernel ring buffer + cloud-init logs on success AND on `errors:` hook. In-memory ring per MAC, viewable via `/api/v1/machines/{mac}/logs` (last ~64KB). | small |
-| 7 | **Container image** | Multi-stage Dockerfile, `setcap cap_net_bind_service+ep` before `USER nonroot`, `VOLUME /var/lib/pxe-beacon`, `EXPOSE 67/udp 69/udp 4011/udp 8080/tcp`, README docs `--network host` + `--cap-add=NET_BIND_SERVICE`. GHCR push in release matrix. | small |
-| 8 | **Quick-win bugfixes** from the API review | • "Fleet mode not enabled" returns 404 → fix to 503<br>• `handleAdminFleetDelete` returns 404 on second call → 200 (idempotency)<br>• `handleStatusJSON` silently swallows encode errors → buffer-then-flush<br>• Default shutdown drain 3s → 30s (configurable) | trivial |
+| 1 | **`params:` map in `machineYAML`** + Go template substitution into preseed / cloud-init / kickstart | Foreman expert's #1 ask. Today N machines with N hostnames = N preseed copies. One map, one merge. Needs a short templating RFC (Go templates, escaping, schema versioning). | small |
+| 2 | **Real SystemRescue rescue boot target** in `dispatch.go` + un-501 the API | One global arm (rescue isn't per-machine). Use SystemRescue HTTP mirror, `archisobasedir=sysresccd` cmdline. Un-501 the `rescue` intent handler. | small |
+| 3 | **Bootstrap tokens for the phone-home callback** (`/events` + `/done` alias) | HMAC-derived from server secret (`HMAC-SHA256(serverSecret, mac \|\| requestedAt-truncated-to-ttl)`). Survives restart, no on-disk state, naturally TTL-bound. Templated into cloud-init via the callback URL. Constant-time compare; mismatch → 403, no state change. Today the callback is unauthenticated. | medium |
+| 4 | **`POST /autoinstall/{mac}/log` capture endpoint** | DC's missing-diagnostic gap. Cloud-init `runcmd` posts kernel ring buffer + cloud-init logs on success AND on `errors:` hook. In-memory ring per MAC, viewable via `/api/v1/machines/{mac}/logs` (last ~64KB). | small |
+| 5 | **Container image** | Multi-stage Dockerfile, `setcap cap_net_bind_service+ep` before `USER nonroot`, `VOLUME /var/lib/pxe-beacon`, `EXPOSE 67/udp 69/udp 4011/udp 8080/tcp`, README docs `--network host` + `--cap-add=NET_BIND_SERVICE`. GHCR push in release matrix. | small |
 
-### Out of scope for v0.8.2
+### Out of scope
 
-- API surface absorption (admin/fleet → /api/v1/*) — that's v0.9
-- Structured error envelope — v0.9
-- Persistence — v0.10
+- BMC integration + `POST /power` — deferred (see bottom).
+- Persistence — next release.
 
 ---
 
-## v0.9.0 — "API as a contract"
+## v0.9.0 — "API as a contract" ✅ SHIPPED (2026-05-25)
 
 **Theme:** One control plane, one error shape, one state shape, one spec — so Terraform / Ansible / React Query / LLM agents have a stable surface.
-**Estimate:** 3–4 weeks.
 **Headline:** "Terraform-grade API. OpenAPI spec. Sunset policy."
 
-### Items (ordering matters)
+All 10 items below shipped. Notable implementation decisions from the
+review panel: a dedicated `saveMu` makes fleet CRUD transactional with
+rollback-on-Save-failure; `Content-Type: application/json` enforcement
+is the CSRF defense (admin became a fetch() client, no token); per-entry
+ETags (not file mtime); `installer-failed` keeps pending intent and
+stays off the monotonic event ladder.
+
+### Items (all shipped)
 
 | # | Item | Why | Effort |
 |---|---|---|---|
@@ -127,6 +142,7 @@ These apply to every PR until further notice:
 
 | Item | Notes |
 |---|---|
+| **BMC integration + `POST /power`** | **Deferred 2026-05-25.** Redfish vocabulary, 202-async, per-BMC mutex, `bmc:` schema in `machineYAML`. The full spec lives in git history (v0.8.2 plan + the architectural-batch review). Pick back up when remote power-cycling is actually needed. |
 | SSE for live observed state | Wait for second UI consumer; polling at homelab scale is trivial |
 | Stable `system_id` (MACs as list) | DC engineer's bigger refactor; needs migration story |
 | Batch endpoints (`POST /api/v1/machines:batch_install`) | Design after OpenAPI settles |
