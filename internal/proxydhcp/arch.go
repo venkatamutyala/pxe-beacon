@@ -121,6 +121,24 @@ func LookupArch(arch iana.Arch) (ArchProfile, bool) {
 	return archTable[iana.EFI_X86_64], false
 }
 
+// ArchLabel returns a short human label for an option-93 arch code, used
+// in the discovery feed so operators can tell a BIOS box from a UEFI one
+// (and spot arm64, which dispatch doesn't yet support). Falls back to the
+// iana String() for codes we don't special-case.
+func ArchLabel(a iana.Arch) string {
+	switch a {
+	case iana.INTEL_X86PC:
+		return "x86 BIOS"
+	case iana.EFI_X86_64, iana.EFI_X86_64_HTTP:
+		return "x86_64 UEFI"
+	case iana.EFI_ARM64, iana.EFI_ARM64_HTTP:
+		return "arm64 UEFI"
+	case iana.EFI_IA32:
+		return "x86 UEFI (IA32)"
+	}
+	return a.String()
+}
+
 // KnownArchs returns the recognized arch codes, useful for diagnostics.
 func KnownArchs() []iana.Arch {
 	out := make([]iana.Arch, 0, len(archTable))

@@ -457,6 +457,68 @@ func parsePaging(w http.ResponseWriter, r *http.Request) (limit, offset int, ok 
 	return limit, offset, true
 }
 
+// handleAPIDiscovered — GET /api/v1/discovered (v0.13.0). Lists unknown
+// MACs seen PXE-booting, for one-click enrollment. MACs that have since
+// become fleet members are filtered out (a discovered box vanishes from
+// the feed once enrolled).
+func (s *Server) handleAPIDiscovered(w http.ResponseWriter, r *http.Request) {
+	if s.opts.Sightings == nil {
+		s.writeError(w, r, http.StatusServiceUnavailable, pxebeacon.ErrCodeFleetNotLoaded,
+			"discovery not enabled", nil)
+		return
+	}
+	limit, offset, ok := parsePaging(w, r)
+	if !ok {
+		return
+	}
+	all := s.opts.Sightings.List()
+	// Drop MACs that are now in the fleet.
+	filtered := all[:0]
+	for _, sg := range all {
+		if s.opts.Fleet == nil || s.opts.Fleet.Lookup(sg.MAC).Name == "" {
+			filtered = append(filtered, sg)
+		}
+	}
+	total := len(filtered)
+	lo := offset
+	if lo > total {
+		lo = total
+	}
+	hi := lo + limit
+	if hi > total {
+		hi = total
+	}
+	page := filtered[lo:hi]
+	out := make([]pxebeacon.Sighting, 0, len(page))
+	for _, sg := range page {
+		out = append(out, pxebeacon.Sighting{
+			MAC: sg.MAC, Arch: sg.Arch, Vendor: sg.Vendor, VendorClass: sg.VendorClass,
+			FirstSeen: sg.FirstSeen, LastSeen: sg.LastSeen, Count: sg.Count,
+		})
+	}
+	writeJSON(w, pxebeacon.DiscoveredResponse{
+		Total: total, Limit: limit, Offset: offset, Discovered: out,
+	})
+}
+
+// handleAPIDismissDiscovered — DELETE /api/v1/discovered/{mac} (v0.13.0).
+// Idempotent: dismissing an absent sighting still returns 204.
+func (s *Server) handleAPIDismissDiscovered(w http.ResponseWriter, r *http.Request) {
+	if s.opts.Sightings == nil {
+		s.writeError(w, r, http.StatusServiceUnavailable, pxebeacon.ErrCodeFleetNotLoaded,
+			"discovery not enabled", nil)
+		return
+	}
+	mac, err := fleet.CanonicalMAC(r.PathValue("mac"))
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, pxebeacon.ErrCodeMACInvalid,
+			"invalid MAC", map[string]any{"mac": r.PathValue("mac")})
+		return
+	}
+	s.opts.Sightings.Forget(mac)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) buildDesired(canon string) pxebeacon.Desired {
 	v := pxebeacon.Desired{}
 	if s.opts.Pending != nil {

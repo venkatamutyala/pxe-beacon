@@ -21,6 +21,7 @@ import (
 	"github.com/venkatamutyala/pxe-beacon/internal/fleet"
 	"github.com/venkatamutyala/pxe-beacon/internal/installlog"
 	"github.com/venkatamutyala/pxe-beacon/internal/narrlog"
+	"github.com/venkatamutyala/pxe-beacon/internal/sightings"
 )
 
 func startTestServer(t *testing.T) string {
@@ -576,6 +577,80 @@ func TestHTTP_Log_CaptureAndRead(t *testing.T) {
 	g.Body.Close()
 	if !strings.Contains(string(got), "kernel panic: it broke") {
 		t.Errorf("logs missing posted content: %q", got)
+	}
+}
+
+func TestHTTP_Discovered_ListDismissAndFilterKnown(t *testing.T) {
+	dir := t.TempDir()
+	// Fleet has one known MAC; the discovery feed must not show it.
+	if err := os.WriteFile(filepath.Join(dir, "fleet.yaml"), []byte(`
+machines:
+  - mac: 58:47:ca:70:c7:c9
+    name: known-1
+    boot: debian-12
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logBuf := &bytes.Buffer{}
+	log := narrlog.New("test", narrlog.LevelDebug, logBuf)
+	f, err := fleet.Load(filepath.Join(dir, "fleet.yaml"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := fleet.NewTracker(f, 5*time.Second)
+	sg := sightings.New()
+	sg.Note("aa:bb:cc:dd:ee:01", "x86_64 UEFI", "PXEClient") // unknown → shows
+	sg.Note("58:47:ca:70:c7:c9", "x86_64 UEFI", "PXEClient") // known → filtered
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	addr := ln.Addr().String()
+	_, portStr, _ := net.SplitHostPort(addr)
+	port, _ := strconv.Atoi(portStr)
+	_ = ln.Close()
+	s, err := New(Options{
+		Listen: addr, AdvertisedIP: "10.0.0.5", HTTPPort: port,
+		Logger: log, Fleet: f, FleetStatus: tr, Sightings: sg,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = s.Serve(ctx); close(done) }()
+	time.Sleep(80 * time.Millisecond)
+	t.Cleanup(func() { cancel(); <-done })
+
+	resp, err := http.Get("http://" + addr + "/api/v1/discovered")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Total      int `json:"total"`
+		Discovered []struct {
+			MAC    string `json:"mac"`
+			Vendor string `json:"vendor"`
+		} `json:"discovered"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	resp.Body.Close()
+	if body.Total != 1 || len(body.Discovered) != 1 {
+		t.Fatalf("want 1 discovered (known MAC filtered), got total=%d len=%d", body.Total, len(body.Discovered))
+	}
+	if body.Discovered[0].MAC != "aa:bb:cc:dd:ee:01" {
+		t.Errorf("unexpected MAC %q", body.Discovered[0].MAC)
+	}
+
+	// Dismiss it → 204, then the feed is empty.
+	req, _ := http.NewRequest("DELETE", "http://"+addr+"/api/v1/discovered/aa-bb-cc-dd-ee-01", nil)
+	dresp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dresp.Body.Close()
+	if dresp.StatusCode != http.StatusNoContent {
+		t.Errorf("DELETE = %d, want 204", dresp.StatusCode)
+	}
+	if sg.Len() != 1 { // only the known-MAC sighting remains in the store
+		t.Errorf("store len = %d, want 1 after dismiss", sg.Len())
 	}
 }
 

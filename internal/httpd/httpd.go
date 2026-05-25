@@ -30,6 +30,7 @@ import (
 	"github.com/venkatamutyala/pxe-beacon/internal/installlog"
 	"github.com/venkatamutyala/pxe-beacon/internal/narrlog"
 	"github.com/venkatamutyala/pxe-beacon/internal/pending"
+	"github.com/venkatamutyala/pxe-beacon/internal/sightings"
 	"github.com/venkatamutyala/pxe-beacon/pkg/pxebeacon"
 	"gopkg.in/yaml.v3"
 )
@@ -109,6 +110,9 @@ type Options struct {
 	// InstallLog holds per-MAC diagnostic log tails posted to /log.
 	// When nil, /log + /logs 404. v0.12.0+.
 	InstallLog *installlog.Store
+	// Sightings holds unknown MACs seen PXE-booting, for the discovery
+	// feed (GET /api/v1/discovered). When nil those routes 503. v0.13.0+.
+	Sightings *sightings.Store
 }
 
 // Server is the pxe-beacon HTTP server.
@@ -277,6 +281,9 @@ func (s *Server) routes() {
 	s.mux.Handle("DELETE /api/v1/machines/{mac}", loopbackOnly(http.HandlerFunc(s.handleAPIDeleteMachine)))
 	s.mux.Handle("GET /api/v1/machines/{mac}", loopbackOnly(http.HandlerFunc(s.handleAPIMachine)))
 	s.mux.Handle("GET /api/v1/machines", loopbackOnly(http.HandlerFunc(s.handleAPIList)))
+	// v0.13.0: discovery feed — unknown MACs seen PXE-booting.
+	s.mux.Handle("GET /api/v1/discovered", loopbackOnly(http.HandlerFunc(s.handleAPIDiscovered)))
+	s.mux.Handle("DELETE /api/v1/discovered/{mac}", loopbackOnly(http.HandlerFunc(s.handleAPIDismissDiscovered)))
 
 	// v0.5.1: debug route — returns the exact bytes TFTP would serve
 	// for autoexec.ipxe. macOS BSD `tftp` has known hangs talking to

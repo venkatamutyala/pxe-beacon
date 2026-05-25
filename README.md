@@ -333,6 +333,8 @@ Full REST surface (loopback-only — see security model below):
 | `GET`    | `/api/v1/machines/{mac}/intent` | read desired + observed |
 | `POST`   | `/api/v1/machines/{mac}/events` | report install lifecycle (`installer-done`/`installer-failed`); JSON or form |
 | `GET`    | `/api/v1/machines/{mac}/logs` | read captured install diagnostics (last ~64 KiB; see Secure callbacks) |
+| `GET`    | `/api/v1/discovered` | list unknown MACs seen PXE-booting (see Discovery) |
+| `DELETE` | `/api/v1/discovered/{mac}` | dismiss a discovered sighting |
 | `GET`    | `/openapi.yaml` | the OpenAPI 3 spec for the above |
 | `GET`    | `/healthz`, `/readyz` | liveness / readiness probes |
 
@@ -415,6 +417,32 @@ kickstart `%onerror`) POST the kernel ring buffer + logs to the
 token-guarded `POST /autoinstall/{mac}/log`; read the last ~64 KiB at
 `GET /api/v1/machines/{mac}/logs` (loopback-only, in-memory, cleared on
 restart). Closes the "it failed and I have no idea why" gap.
+
+#### Discovery (v0.13.0+)
+
+proxyDHCP sees every PXE `DISCOVER` on the segment — including from
+machines not in `fleet.yaml`. Those unknown MACs are now recorded in a
+discovery feed so you can enroll them without hand-typing MACs:
+
+```bash
+curl http://127.0.0.1:8080/api/v1/discovered
+# {"total":1,"discovered":[{"mac":"dc:a6:32:...","arch":"arm64 UEFI",
+#   "vendor":"Raspberry Pi","vendor_class":"PXEClient:Arch:00011",
+#   "first_seen":"...","last_seen":"...","count":3}]}
+```
+
+The `/admin` "Discovered" panel lists them with **Add to fleet** (prefills
+the create form — MAC + arch-derived boot default) and **Dismiss**
+(`DELETE /api/v1/discovered/{mac}`). `vendor` comes from a small built-in
+OUI table (common server/SBC makers; blank if unrecognized); `arch` is the
+DHCP option-93 arch. Sightings dedup by MAC (with `count` + `last_seen`),
+are bounded + in-memory (cleared on restart), and a sighting disappears
+from the feed once its MAC is enrolled.
+
+It's **observational only** — discovery never changes how an unknown box
+boots (still the netboot.xyz fallback) and never installs anything;
+enrollment + intent stay explicit operator actions. There's no
+auto-enroll: `fleet.yaml` only changes when you click.
 
 #### Rescue mode (v0.11.0+)
 

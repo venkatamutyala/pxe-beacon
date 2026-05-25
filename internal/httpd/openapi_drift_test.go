@@ -44,6 +44,7 @@ func TestOpenAPI_SchemasMatchStructs(t *testing.T) {
 		{"Intent", reflect.TypeOf(pxebeacon.Intent{})},
 		{"MachineConfig", reflect.TypeOf(pxebeacon.MachineConfig{})},
 		{"Error", reflect.TypeOf(pxebeacon.APIError{})},
+		{"Sighting", reflect.TypeOf(pxebeacon.Sighting{})},
 	}
 
 	for _, c := range cases {

@@ -63,7 +63,7 @@
 
 <h2>fleet machines</h2>
 <p class="mac">
-  Machines are <strong>idle</strong> by default — pxe-beacon ignores their PXE DHCP requests and they fall through to local-disk boot. Click <strong>install</strong> to queue an OS install on next power-on (auto-expires in {{.PendingTTL}}). Cloud-init phone-home auto-cancels. <em>rescue</em> mode is reserved for a future release.
+  Machines are <strong>idle</strong> by default — pxe-beacon ignores their PXE DHCP requests and they fall through to local-disk boot. Click <strong>install</strong> to queue an OS install on next power-on (auto-expires in {{.PendingTTL}}). Cloud-init phone-home auto-cancels. <strong>rescue</strong> boots SystemRescue on next power-on (run <code>pxe-beacon fetch systemrescue</code> first).
   <br>API: <code>PUT /api/v1/machines/&lt;mac&gt;/intent {"action":"install"|"rescue"|null}</code> · <code>GET /api/v1/machines</code>
 </p>
 <table>
@@ -79,7 +79,7 @@
       <td class="pending-cell">
         <span class="pending-state idle">idle</span>
         <button type="button" class="deploy" data-intent="install">install</button>
-        <button type="button" class="rescue" data-intent="rescue" title="reserved for a future release">rescue</button>
+        <button type="button" class="rescue" data-intent="rescue" title="boot SystemRescue on next power-on">rescue</button>
         <button type="button" class="cancel" data-intent="" style="display:none">cancel</button>
       </td>
       <td>{{if .Profile.Preseed}}{{.Profile.Preseed}}{{else}}<span class="mac">(default)</span>{{end}}</td>
@@ -233,6 +233,76 @@ document.getElementById('save-machine').addEventListener('submit', async (e) => 
 });
 </script>
 
+<h2>discovered</h2>
+<p class="mac">
+  Unknown MACs seen PXE-booting on this segment (not yet in the fleet).
+  Click <strong>add to fleet</strong> to prefill the form below, or
+  <em>dismiss</em> to drop the sighting. In-memory; cleared on restart.
+  <br>API: <code>GET /api/v1/discovered</code> · <code>DELETE /api/v1/discovered/&lt;mac&gt;</code>
+</p>
+<table id="discovered-table">
+  <thead>
+    <tr><th>mac</th><th>vendor</th><th>arch</th><th>seen</th><th>last</th><th></th></tr>
+  </thead>
+  <tbody id="discovered-body">
+    <tr><td colspan="6" class="mac">loading…</td></tr>
+  </tbody>
+</table>
+<script>
+function archToBoot(arch) {
+  if (/arm64/i.test(arch)) return 'menu';   // arm64 boot not yet supported
+  return 'menu';                            // safe default; operator picks the OS
+}
+async function refreshDiscovered() {
+  const body = document.getElementById('discovered-body');
+  let data;
+  try {
+    const res = await fetch('/api/v1/discovered');
+    if (!res.ok) { body.innerHTML = '<tr><td colspan="6" class="mac">discovery unavailable</td></tr>'; return; }
+    data = await res.json();
+  } catch (e) {
+    body.innerHTML = '<tr><td colspan="6" class="mac">discovery unavailable</td></tr>';
+    return;
+  }
+  const rows = (data.discovered || []);
+  if (rows.length === 0) {
+    body.innerHTML = '<tr><td colspan="6" class="mac">nothing discovered yet</td></tr>';
+    return;
+  }
+  body.innerHTML = '';
+  rows.forEach(sg => {
+    const tr = document.createElement('tr');
+    const arm = /arm64/i.test(sg.arch);
+    tr.innerHTML =
+      '<td class="mac">' + sg.mac + '</td>' +
+      '<td>' + (sg.vendor || '<span class="mac">?</span>') + '</td>' +
+      '<td>' + sg.arch + (arm ? ' <span class="mac">(unsupported)</span>' : '') + '</td>' +
+      '<td>' + sg.count + '×</td>' +
+      '<td class="mac">' + new Date(sg.last_seen).toLocaleString() + '</td>' +
+      '<td class="actions"></td>';
+    const actions = tr.querySelector('.actions');
+    const add = document.createElement('button');
+    add.type = 'button'; add.className = 'primary'; add.textContent = 'add to fleet';
+    add.onclick = () => {
+      document.getElementById('mac').value = sg.mac;
+      document.getElementById('boot').value = archToBoot(sg.arch);
+      document.getElementById('name').focus();
+      document.getElementById('save-machine').scrollIntoView({behavior: 'smooth'});
+    };
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button'; dismiss.className = 'danger'; dismiss.textContent = 'dismiss';
+    dismiss.onclick = async () => {
+      await fetch('/api/v1/discovered/' + encodeURIComponent(sg.mac), {method: 'DELETE'});
+      refreshDiscovered();
+    };
+    actions.append(add, document.createTextNode(' '), dismiss);
+    body.append(tr);
+  });
+}
+refreshDiscovered();
+setInterval(refreshDiscovered, 10000);
+</script>
+
 <h2>add or update a machine</h2>
 <form class="machine" id="save-machine">
   <label for="mac">mac</label>
@@ -260,7 +330,7 @@ document.getElementById('save-machine').addEventListener('submit', async (e) => 
   <input id="kickstart" name="kickstart" type="text" placeholder="(empty = embedded default for rocky-9 / alma-9)">
 
   <label for="cloud_init">cloud_init</label>
-  <input id="cloud_init" name="cloud_init" type="text" placeholder="(empty = embedded default with phone_home)">
+  <input id="cloud_init" name="cloud_init" type="text" placeholder="(empty = embedded default; don't define phone_home — pxe-beacon appends it)">
 
   <label for="ipxe_script">ipxe_script</label>
   <input id="ipxe_script" name="ipxe_script" type="text" placeholder="(required for boot: custom)">

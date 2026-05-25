@@ -457,6 +457,8 @@ func TestOpenAPISpec_ParsesAndCoversSurface(t *testing.T) {
 		"/api/v1/machines/{mac}/intent": true,
 		"/api/v1/machines/{mac}/events": true,
 		"/api/v1/machines/{mac}/logs":   true,
+		"/api/v1/discovered":            true,
+		"/api/v1/discovered/{mac}":      true,
 	}
 	for p := range want {
 		if !documented[p] {

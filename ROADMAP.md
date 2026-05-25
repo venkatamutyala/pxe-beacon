@@ -95,6 +95,26 @@ Install diagnostics: installer failure hooks (Subiquity `error-commands`,
 kickstart `%onerror`) POST logs to the token-guarded `POST /log`; read at
 `GET /api/v1/machines/{mac}/logs` (in-memory ~64 KiB/MAC, loopback-only).
 
+## v0.13.0 — "Discovery" ✅ SHIPPED
+
+**Shipped:** unknown MACs that PXE-boot are recorded in a discovery feed
+for one-click enrollment. proxyDHCP fires a `NoteSighting` callback on the
+firmware-stage path for non-fleet MACs (once per DISCOVER; deduped by MAC
+with `count`/`first`/`last_seen`); `internal/sightings` is a bounded
+in-memory store (cap 256, oldest-evicted, RetainOnly-pruned on SIGHUP so
+enrolled MACs drop out). `GET /api/v1/discovered` (paginated, filters
+now-known MACs) + `DELETE /api/v1/discovered/{mac}`; an `/admin`
+"Discovered" panel with Add-to-fleet (prefill) + Dismiss. Vendor comes
+from a small embedded OUI table; arch from option 93.
+
+**Decisions (from the conversation):** **discovery-only, no auto-enroll** —
+`fleet.yaml` changes only when the operator clicks, and discovery never
+changes boot behavior or installs anything (observational). OUI vendor
+lookup via a small embedded curated table (not the full IEEE registry).
+
+Also folded in: the **Node 20 → 24 CI bump** (`actions/checkout@v5`,
+`actions/setup-go@v6`) ahead of GitHub's June 2 2026 forced migration.
+
 ## Next: "Persistence + history" (features)
 
 **Theme:** State survives restart; audit log is the same journal.
@@ -190,7 +210,6 @@ stays off the monotonic event ladder.
 | Stable `system_id` (MACs as list) | DC engineer's bigger refactor; needs migration story |
 | Batch endpoints (`POST /api/v1/machines:batch_install`) | Design after OpenAPI settles |
 | Multi-arch dispatch (un-refuse ARM64) | Distinct feature; needs per-arch mirror config |
-| Enlistment-lite (auto-add unknown MACs to /admin pending list) | Distinct UX feature |
 | Webhook notifications (`installer-done`, `installer-failed`) | Fold into the events resource |
 | Per-MAC mutex on `Pending` | Only matters if pending grows per-entry metadata |
 | Remote API access (token-bearer auth, lift loopback-only) | Needs CA/secret-management story |

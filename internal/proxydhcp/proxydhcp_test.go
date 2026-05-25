@@ -628,3 +628,35 @@ func TestBuildOffer_RejectsBadConfig(t *testing.T) {
 		t.Error("expected error for HTTPPort=0")
 	}
 }
+
+func TestBuildOffer_NoteSighting_UnknownMACOnly(t *testing.T) {
+	// v0.13.0: a firmware-stage DISCOVER from an unknown MAC fires the
+	// discovery callback; a fleet-known MAC does not.
+	var seen []string
+	cfg := defaultCfg()
+	cfg.NoteSighting = func(mac, arch, vc string) {
+		seen = append(seen, mac+"|"+arch+"|"+vc)
+	}
+
+	// Unknown MAC, firmware stage → one sighting with arch label.
+	req := newDiscover(t, "52:54:00:ab:cd:ef", iana.EFI_X86_64, "PXEClient:Arch:00007", "")
+	if _, _, err := BuildOffer(req, cfg); err != nil {
+		t.Fatalf("BuildOffer: %v", err)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("want 1 sighting, got %d (%v)", len(seen), seen)
+	}
+	if !strings.Contains(seen[0], "x86_64 UEFI") {
+		t.Errorf("sighting missing arch label: %q", seen[0])
+	}
+
+	// iPXE-stage request from the same MAC must NOT add a sighting.
+	seen = nil
+	reqIPXE := newDiscover(t, "52:54:00:ab:cd:ef", iana.EFI_X86_64, "PXEClient", "iPXE")
+	if _, _, err := BuildOffer(reqIPXE, cfg); err != nil {
+		t.Fatalf("BuildOffer iPXE: %v", err)
+	}
+	if len(seen) != 0 {
+		t.Errorf("iPXE-stage should not be sighted, got %v", seen)
+	}
+}

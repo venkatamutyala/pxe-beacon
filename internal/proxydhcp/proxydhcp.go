@@ -60,6 +60,12 @@ type Config struct {
 	// an accidental reinstall. Operator's explicit PUT /intent re-arms
 	// (pending becomes non-nil; guard does not fire). v0.8.1+.
 	LastEvent func(mac string) fleet.Event
+	// NoteSighting, when non-nil, is called once per firmware-stage
+	// DISCOVER from a MAC NOT in the fleet, so the discovery feed can
+	// surface unknown machines for one-click enrollment. archLabel is a
+	// human arch string; vendorClass is the raw DHCP option-60. Known
+	// MACs and iPXE-stage requests are never reported. v0.13.0+.
+	NoteSighting func(mac, archLabel, vendorClass string)
 }
 
 // defaultUserClass returns the configured iPXE user class, defaulting
@@ -299,6 +305,13 @@ func BuildOffer(req *dhcpv4.DHCPv4, cfg Config) (*dhcpv4.DHCPv4, Decision, error
 	d.UnknownArch = !ok
 	d.Transport = profile.Transport
 	d.BootFile = profile.BootFile
+
+	// v0.13.0: record unknown MACs for the discovery feed. Firmware
+	// stage only (iPXE-stage returned earlier), so one fire per
+	// firmware DISCOVER; the sightings store dedups retries by MAC.
+	if !machineKnown && cfg.NoteSighting != nil {
+		cfg.NoteSighting(d.ClientMAC, ArchLabel(d.SelectedArch), d.VendorClass)
+	}
 
 	switch profile.Transport {
 	case TransportTFTP:

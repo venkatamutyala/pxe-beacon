@@ -26,6 +26,7 @@ import (
 	"github.com/venkatamutyala/pxe-beacon/internal/netinfo"
 	"github.com/venkatamutyala/pxe-beacon/internal/pending"
 	"github.com/venkatamutyala/pxe-beacon/internal/proxydhcp"
+	"github.com/venkatamutyala/pxe-beacon/internal/sightings"
 	tftpd "github.com/venkatamutyala/pxe-beacon/internal/tftp"
 )
 
@@ -151,6 +152,10 @@ func main() {
 	callbackSigner := callbacktoken.New(tokenSecret, *flagCallbackTTL)
 	installLog := installlog.New()
 
+	// v0.13.0: discovery feed — unknown MACs that PXE-boot get recorded
+	// for one-click enrollment via /api/v1/discovered + the admin panel.
+	sightingStore := sightings.New()
+
 	cfg := proxydhcp.Config{
 		AdvertisedIP:   advIP,
 		HTTPPort:       *flagHTTPPort,
@@ -161,6 +166,8 @@ func main() {
 		// Tracker via this callback so a previously-installed box
 		// without fresh pending intent stops receiving OFFERs.
 		LastEvent: statusTracker.LastEvent,
+		// v0.13.0: record unknown MACs for the discovery feed.
+		NoteSighting: sightingStore.Note,
 	}
 
 	lst, err := proxydhcp.New(proxydhcp.ServerOptions{
@@ -242,6 +249,7 @@ func main() {
 		CallbackTokens:       callbackSigner,
 		RequireCallbackToken: !*flagInsecureCB,
 		InstallLog:           installLog,
+		Sightings:            sightingStore,
 	})
 	if err != nil {
 		log.Errorf("init http: %v", err)
@@ -250,7 +258,7 @@ func main() {
 
 	// SIGHUP triggers a fleet config reload (no-op for Empty fleet).
 	if *flagConfig != "" {
-		go watchSIGHUP(ctx, fl, pendSt, installLog, log)
+		go watchSIGHUP(ctx, fl, pendSt, installLog, sightingStore, log)
 	}
 
 	errc := make(chan error, 3)
@@ -289,7 +297,7 @@ func main() {
 // v0.8.1: after a successful reload, the pending store also drops
 // any entries for MACs no longer in the fleet, so removing a machine
 // from fleet.yaml cleanly cancels its queued intent.
-func watchSIGHUP(ctx context.Context, fl *fleet.Fleet, pendSt *pending.Store, installLog *installlog.Store, log *narrlog.Logger) {
+func watchSIGHUP(ctx context.Context, fl *fleet.Fleet, pendSt *pending.Store, installLog *installlog.Store, sightingStore *sightings.Store, log *narrlog.Logger) {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGHUP)
 	defer signal.Stop(ch)
@@ -314,6 +322,13 @@ func watchSIGHUP(ctx context.Context, fl *fleet.Fleet, pendSt *pending.Store, in
 			if installLog != nil {
 				if removed := installLog.RetainOnly(known); removed > 0 {
 					log.Infof("reload: dropped install logs for %d removed MAC(s)", removed)
+				}
+			}
+			// Drop sightings for MACs that are now fleet members (the
+			// box got enrolled, so it shouldn't linger in the feed).
+			if sightingStore != nil {
+				if removed := sightingStore.RetainOnly(func(mac string) bool { return !known(mac) }); removed > 0 {
+					log.Infof("reload: dropped %d discovered sighting(s) now enrolled", removed)
 				}
 			}
 		}

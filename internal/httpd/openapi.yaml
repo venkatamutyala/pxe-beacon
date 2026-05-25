@@ -13,7 +13,7 @@ info:
 
     Errors use a structured envelope `{code, message, details?}`.
     Branch on `code` (stable); `message` prose may be reworded.
-  version: "0.12.0"
+  version: "0.13.0"
 servers:
   - url: http://localhost:8080
     description: loopback (default)
@@ -165,6 +165,38 @@ paths:
               schema: { $ref: "#/components/schemas/Machine" }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /api/v1/discovered:
+    get:
+      summary: List discovered (unknown) machines (v0.13.0)
+      description: >
+        Unknown MACs seen PXE-booting on the segment, for one-click
+        enrollment. Deduped by MAC with first/last-seen + count; MACs that
+        have become fleet members are filtered out. In-memory, cleared on
+        restart. Loopback-only. Paginated (?limit=&offset=).
+      responses:
+        "200":
+          description: discovery feed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+                  discovered:
+                    type: array
+                    items: { $ref: "#/components/schemas/Sighting" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/v1/discovered/{mac}:
+    parameters:
+      - { name: mac, in: path, required: true, schema: { type: string } }
+    delete:
+      summary: Dismiss a discovered machine (v0.13.0)
+      description: Idempotent; removes the sighting from the feed.
+      responses:
+        "204": { description: dismissed }
+        "400": { $ref: "#/components/responses/Error" }
   /api/v1/machines/{mac}/logs:
     parameters:
       - { name: mac, in: path, required: true, schema: { type: string } }
@@ -194,6 +226,16 @@ paths:
         "503": { description: not ready (a subsystem isn't wired) }
 components:
   schemas:
+    Sighting:
+      type: object
+      properties:
+        mac: { type: string }
+        arch: { type: string, description: "human arch label, e.g. x86_64 UEFI" }
+        vendor: { type: string, description: "from the OUI table; empty if unknown" }
+        vendor_class: { type: string, description: "raw DHCP option-60 string" }
+        first_seen: { type: string, format: date-time }
+        last_seen: { type: string, format: date-time }
+        count: { type: integer }
     Desired:
       type: object
       properties:

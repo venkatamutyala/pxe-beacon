@@ -76,6 +76,27 @@ type ListResponse struct {
 	Machines    []Machine `json:"machines"`
 }
 
+// Sighting is one unknown MAC observed PXE-booting on the segment, for
+// the discovery feed (GET /api/v1/discovered). v0.13.0+.
+type Sighting struct {
+	MAC         string    `json:"mac"`
+	Arch        string    `json:"arch"`
+	Vendor      string    `json:"vendor"`
+	VendorClass string    `json:"vendor_class"`
+	FirstSeen   time.Time `json:"first_seen"`
+	LastSeen    time.Time `json:"last_seen"`
+	Count       int       `json:"count"`
+}
+
+// DiscoveredResponse is the body of GET /api/v1/discovered. Total is the
+// full sighting count before paging; Limit/Offset echo the window.
+type DiscoveredResponse struct {
+	Total      int        `json:"total"`
+	Limit      int        `json:"limit"`
+	Offset     int        `json:"offset"`
+	Discovered []Sighting `json:"discovered"`
+}
+
 // ServerInfo is the server-level block in StatusResponse.
 type ServerInfo struct {
 	AdvertisedIP string `json:"advertised_ip"`
