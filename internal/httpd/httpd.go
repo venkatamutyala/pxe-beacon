@@ -28,6 +28,7 @@ import (
 	"github.com/venkatamutyala/pxe-beacon/internal/fleet"
 	"github.com/venkatamutyala/pxe-beacon/internal/narrlog"
 	"github.com/venkatamutyala/pxe-beacon/internal/pending"
+	"github.com/venkatamutyala/pxe-beacon/pkg/pxebeacon"
 )
 
 //go:embed status.html
@@ -286,13 +287,13 @@ var macHyphen = regexp.MustCompile(`^[0-9a-fA-F]{2}(-[0-9a-fA-F]{2}){5}$`)
 func (s *Server) extractMAC(w http.ResponseWriter, r *http.Request) string {
 	raw := r.PathValue("mac")
 	if raw == "" {
-		s.writeError(w, r, http.StatusBadRequest, ErrCodeMACMissing, "missing mac in URL", nil)
+		s.writeError(w, r, http.StatusBadRequest, pxebeacon.ErrCodeMACMissing, "missing mac in URL", nil)
 		return ""
 	}
 	// Accept hyphen-MAC (the canonical URL form) or colon-MAC.
 	canon, err := fleet.CanonicalMAC(raw)
 	if err != nil {
-		s.writeError(w, r, http.StatusBadRequest, ErrCodeMACInvalid,
+		s.writeError(w, r, http.StatusBadRequest, pxebeacon.ErrCodeMACInvalid,
 			fmt.Sprintf("invalid mac %q: %v", raw, err), map[string]any{"input": raw})
 		return ""
 	}
@@ -306,7 +307,7 @@ func (s *Server) extractMAC(w http.ResponseWriter, r *http.Request) string {
 // content-negotiated so an API client gets the structured envelope.
 func (s *Server) fleetReady(w http.ResponseWriter, r *http.Request) bool {
 	if s.opts.Fleet == nil || s.opts.FleetStatus == nil {
-		s.writeError(w, r, http.StatusServiceUnavailable, ErrCodeFleetNotLoaded,
+		s.writeError(w, r, http.StatusServiceUnavailable, pxebeacon.ErrCodeFleetNotLoaded,
 			"fleet mode not enabled (start pxe-beacon with -config <fleet.yaml>)", nil)
 		return false
 	}
@@ -723,7 +724,7 @@ func (s *Server) handleInstallEvent(w http.ResponseWriter, r *http.Request) {
 	case "installer-failed", "failed":
 		ev = fleet.EventInstallerFailed
 	default:
-		s.writeError(w, r, http.StatusBadRequest, ErrCodeActionInvalid,
+		s.writeError(w, r, http.StatusBadRequest, pxebeacon.ErrCodeActionInvalid,
 			`phase must be "installer-done" or "installer-failed"`,
 			map[string]any{"got": phase})
 		return
@@ -927,19 +928,19 @@ func (s *Server) handleStatusJSON(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	machines := s.opts.Fleet.ListMachines()
-	out := make([]machineAPIView, 0, len(machines))
+	out := make([]pxebeacon.Machine, 0, len(machines))
 	for _, m := range machines {
 		out = append(out, s.buildMachineView(m.MAC, m.Profile))
 	}
-	payload := map[string]any{
-		"server": map[string]any{
-			"advertised_ip": s.opts.AdvertisedIP,
-			"http_port":     s.opts.HTTPPort,
-			"uptime_s":      int(time.Since(s.startedAt).Seconds()),
-			"started_at":    s.startedAt.UTC().Format(time.RFC3339),
-			"pending_ttl_s": pendingTTLSeconds(s.opts.Pending),
+	payload := pxebeacon.StatusResponse{
+		Server: pxebeacon.ServerInfo{
+			AdvertisedIP: s.opts.AdvertisedIP,
+			HTTPPort:     s.opts.HTTPPort,
+			UptimeS:      int(time.Since(s.startedAt).Seconds()),
+			StartedAt:    s.startedAt.UTC().Format(time.RFC3339),
+			PendingTTLs:  pendingTTLSeconds(s.opts.Pending),
 		},
-		"machines": out,
+		Machines: out,
 	}
 
 	// Buffer first, then flush — so an encode error becomes a 500

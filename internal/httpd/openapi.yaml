@@ -13,7 +13,7 @@ info:
 
     Errors use a structured envelope `{code, message, details?}`.
     Branch on `code` (stable); `message` prose may be reworded.
-  version: "0.9.0"
+  version: "0.9.1"
 servers:
   - url: http://localhost:8080
     description: loopback (default)

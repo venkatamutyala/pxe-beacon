@@ -13,6 +13,7 @@ import (
 
 	"github.com/venkatamutyala/pxe-beacon/internal/fleet"
 	"github.com/venkatamutyala/pxe-beacon/internal/pending"
+	"github.com/venkatamutyala/pxe-beacon/pkg/pxebeacon"
 )
 
 // v0.8.0 K8s-style boot-intent API.
@@ -30,82 +31,24 @@ import (
 // Query map cleanly to PUT-on-resource. See the v0.8.0 PM review
 // in plan history.
 
-// desiredView is the operator's queued intent for next PXE boot.
-type desiredView struct {
-	Action      string    `json:"action,omitempty"` // "install" | "rescue" | ""
-	RequestedAt time.Time `json:"requested_at,omitempty"`
-	ExpiresAt   time.Time `json:"expires_at,omitempty"`
-}
+// The wire types (Machine, Desired, Observed, Intent, MachineConfig,
+// APIError, the response bodies) and the ErrCode constants moved to
+// the importable pkg/pxebeacon package in v0.9.1 so SDK/Terraform/UI
+// authors can depend on them. This file builds and returns them.
 
-// observedView is what the install-progress tracker most recently saw.
-type observedView struct {
-	Phase    string    `json:"phase,omitempty"`
-	LastSeen time.Time `json:"last_seen,omitempty"`
-}
-
-// machineAPIView is the JSON shape returned by GET /api/v1/machines/{mac}
-// and (per-entry) by GET /api/v1/machines.
-type machineAPIView struct {
-	MAC      string       `json:"mac"`
-	Name     string       `json:"name,omitempty"`
-	Boot     string       `json:"boot,omitempty"`
-	Desired  desiredView  `json:"desired"`
-	Observed observedView `json:"observed"`
-}
-
-// intentView is the standalone shape returned by GET /api/v1/machines/{mac}/intent.
-// Same desired + observed pair but at the resource root (no surrounding
-// machine fields), matching K8s subresource conventions.
-type intentView struct {
-	MAC      string       `json:"mac"`
-	Desired  desiredView  `json:"desired"`
-	Observed observedView `json:"observed"`
-}
-
-// intentPUTBody is what a client PUTs to set desired intent. We
-// parse Action as a json.RawMessage so we can distinguish three
-// states the spec demands:
+// intentPUTBody is what a client PUTs to set desired intent. We parse
+// Action as a json.RawMessage so we can distinguish three states the
+// spec demands:
 //
 //	missing key             → 400 (operator must be explicit)
 //	"action": null          → clear pending
 //	"action": "install"|... → queue that action
+//
+// Kept unexported here (not in pkg/pxebeacon): the RawMessage is a
+// server-side parsing detail, not part of the documented wire shape —
+// the OpenAPI spec documents the body as {action: string|null}.
 type intentPUTBody struct {
 	Action json.RawMessage `json:"action"`
-}
-
-// Error code constants. Stable identifiers — clients should branch on
-// these, not on the prose `message`. New codes are additive; existing
-// codes don't change meaning across releases. v0.9.0+.
-const (
-	ErrCodeFleetNotLoaded       = "fleet_not_loaded"
-	ErrCodePendingNotConfigured = "pending_not_configured"
-	ErrCodeMACMissing           = "mac_missing"
-	ErrCodeMACInvalid           = "mac_invalid"
-	ErrCodeMACNotInFleet        = "mac_not_in_fleet"
-	ErrCodeBodyInvalid          = "body_invalid"
-	ErrCodeActionMissing        = "action_missing"
-	ErrCodeActionInvalid        = "action_invalid"
-	ErrCodeRescueUnimplemented  = "rescue_unimplemented"
-	ErrCodePendingFailed        = "pending_failed"
-	ErrCodePagingInvalid        = "paging_invalid"
-	// v0.9.0 fleet-CRUD codes.
-	ErrCodeContentType          = "content_type_unsupported"
-	ErrCodeMACExists            = "mac_exists"
-	ErrCodeBootInvalid          = "boot_invalid"
-	ErrCodeValidationFailed     = "validation_failed"
-	ErrCodePreconditionRequired = "precondition_required"
-	ErrCodePreconditionFailed   = "precondition_failed"
-	ErrCodeSaveFailed           = "save_failed"
-)
-
-// apiErrorView is the v0.9.0+ structured error response. `code` is the
-// machine-readable identifier clients should branch on; `message` is
-// human-prose; `details` is an optional bag for context (e.g. accepted
-// values, the offending field).
-type apiErrorView struct {
-	Code    string         `json:"code"`
-	Message string         `json:"message"`
-	Details map[string]any `json:"details,omitempty"`
 }
 
 // apiReady asserts fleet + Pending are wired.
@@ -115,12 +58,12 @@ type apiErrorView struct {
 // up but this part of it isn't configured."
 func (s *Server) apiReady(w http.ResponseWriter) bool {
 	if s.opts.Fleet == nil || s.opts.FleetStatus == nil {
-		writeAPIError(w, http.StatusServiceUnavailable, ErrCodeFleetNotLoaded,
+		writeAPIError(w, http.StatusServiceUnavailable, pxebeacon.ErrCodeFleetNotLoaded,
 			"fleet mode not enabled (start pxe-beacon with -config <fleet.yaml>)", nil)
 		return false
 	}
 	if s.opts.Pending == nil {
-		writeAPIError(w, http.StatusServiceUnavailable, ErrCodePendingNotConfigured,
+		writeAPIError(w, http.StatusServiceUnavailable, pxebeacon.ErrCodePendingNotConfigured,
 			"pending-action store not configured", nil)
 		return false
 	}
@@ -130,19 +73,19 @@ func (s *Server) apiReady(w http.ResponseWriter) bool {
 func (s *Server) apiExtractFleetMAC(w http.ResponseWriter, r *http.Request) (string, fleet.Profile) {
 	raw := r.PathValue("mac")
 	if raw == "" {
-		writeAPIError(w, http.StatusBadRequest, ErrCodeMACMissing, "missing mac in URL", nil)
+		writeAPIError(w, http.StatusBadRequest, pxebeacon.ErrCodeMACMissing, "missing mac in URL", nil)
 		return "", fleet.Profile{}
 	}
 	canon, err := fleet.CanonicalMAC(raw)
 	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, ErrCodeMACInvalid,
+		writeAPIError(w, http.StatusBadRequest, pxebeacon.ErrCodeMACInvalid,
 			"invalid mac: "+err.Error(),
 			map[string]any{"input": raw})
 		return "", fleet.Profile{}
 	}
 	p := s.opts.Fleet.Lookup(canon)
 	if p.Name == "" {
-		writeAPIError(w, http.StatusNotFound, ErrCodeMACNotInFleet,
+		writeAPIError(w, http.StatusNotFound, pxebeacon.ErrCodeMACNotInFleet,
 			"mac "+canon+" is not in fleet.yaml",
 			map[string]any{"mac": canon})
 		return "", fleet.Profile{}
@@ -164,7 +107,7 @@ func (s *Server) handleAPISetIntent(w http.ResponseWriter, r *http.Request) {
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 8192))
 	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, ErrCodeBodyInvalid,
+		writeAPIError(w, http.StatusBadRequest, pxebeacon.ErrCodeBodyInvalid,
 			"read body: "+err.Error(), nil)
 		return
 	}
@@ -172,13 +115,13 @@ func (s *Server) handleAPISetIntent(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&in); err != nil {
-		writeAPIError(w, http.StatusBadRequest, ErrCodeBodyInvalid,
+		writeAPIError(w, http.StatusBadRequest, pxebeacon.ErrCodeBodyInvalid,
 			"decode body: "+err.Error(), nil)
 		return
 	}
 	// Require explicit "action" key. A naked {} is ambiguous.
 	if len(in.Action) == 0 {
-		writeAPIError(w, http.StatusBadRequest, ErrCodeActionMissing,
+		writeAPIError(w, http.StatusBadRequest, pxebeacon.ErrCodeActionMissing,
 			`body must include "action" key with value "install", "rescue", or null`,
 			map[string]any{"accepted": []string{"install", "rescue", "null"}})
 		return
@@ -188,7 +131,7 @@ func (s *Server) handleAPISetIntent(w http.ResponseWriter, r *http.Request) {
 	var action string
 	if string(in.Action) != "null" {
 		if err := json.Unmarshal(in.Action, &action); err != nil {
-			writeAPIError(w, http.StatusBadRequest, ErrCodeActionInvalid,
+			writeAPIError(w, http.StatusBadRequest, pxebeacon.ErrCodeActionInvalid,
 				`"action" must be a string or null; got `+string(in.Action),
 				map[string]any{"got": string(in.Action), "accepted": []string{"install", "rescue", "null"}})
 			return
@@ -197,7 +140,7 @@ func (s *Server) handleAPISetIntent(w http.ResponseWriter, r *http.Request) {
 	switch action {
 	case "install":
 		if _, err := s.opts.Pending.Install(mac); err != nil {
-			writeAPIError(w, http.StatusInternalServerError, ErrCodePendingFailed,
+			writeAPIError(w, http.StatusInternalServerError, pxebeacon.ErrCodePendingFailed,
 				"install: "+err.Error(), nil)
 			return
 		}
@@ -209,7 +152,7 @@ func (s *Server) handleAPISetIntent(w http.ResponseWriter, r *http.Request) {
 		// intent that silently boots the configured install OS
 		// instead, which is worse than refusing the call.
 		s.logIntent(r, mac, p.Name, "rescue", 501)
-		writeAPIError(w, http.StatusNotImplemented, ErrCodeRescueUnimplemented,
+		writeAPIError(w, http.StatusNotImplemented, pxebeacon.ErrCodeRescueUnimplemented,
 			"rescue boot target not yet wired (tracked for v0.8.2); intent NOT queued",
 			map[string]any{"tracked": "v0.8.2"})
 		return
@@ -217,7 +160,7 @@ func (s *Server) handleAPISetIntent(w http.ResponseWriter, r *http.Request) {
 		s.opts.Pending.Cancel(mac)
 		s.logIntent(r, mac, p.Name, "cancel", 200)
 	default:
-		writeAPIError(w, http.StatusBadRequest, ErrCodeActionInvalid,
+		writeAPIError(w, http.StatusBadRequest, pxebeacon.ErrCodeActionInvalid,
 			`action must be "install", "rescue", or null; got `+action,
 			map[string]any{"got": action, "accepted": []string{"install", "rescue", "null"}})
 		return
@@ -253,20 +196,6 @@ func (s *Server) handleAPIMachine(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.buildMachineView(mac, p))
 }
 
-// machineConfigBody is the JSON body for POST/PUT /api/v1/machines.
-// Mirrors the fleet.yaml per-machine fields. For POST, `mac` is taken
-// from the body; for PUT it comes from the URL path and any body `mac`
-// is ignored.
-type machineConfigBody struct {
-	MAC        string `json:"mac,omitempty"`
-	Name       string `json:"name"`
-	Boot       string `json:"boot"`
-	Preseed    string `json:"preseed,omitempty"`
-	Kickstart  string `json:"kickstart,omitempty"`
-	CloudInit  string `json:"cloud_init,omitempty"`
-	IPXEScript string `json:"ipxe_script,omitempty"`
-}
-
 // requireJSON enforces Content-Type: application/json on fleet-mutation
 // endpoints. This is the v0.9.0 CSRF defense: a cross-origin browser
 // fetch with application/json triggers a CORS preflight that fails
@@ -279,7 +208,7 @@ func (s *Server) requireJSON(w http.ResponseWriter, r *http.Request) bool {
 		ct = ct[:i]
 	}
 	if strings.TrimSpace(ct) != "application/json" {
-		writeAPIError(w, http.StatusUnsupportedMediaType, ErrCodeContentType,
+		writeAPIError(w, http.StatusUnsupportedMediaType, pxebeacon.ErrCodeContentType,
 			"Content-Type must be application/json",
 			map[string]any{"got": r.Header.Get("Content-Type")})
 		return false
@@ -288,27 +217,27 @@ func (s *Server) requireJSON(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // decodeMachineBody reads + strictly decodes the JSON config body.
-func decodeMachineBody(w http.ResponseWriter, r *http.Request) (machineConfigBody, bool) {
+func decodeMachineBody(w http.ResponseWriter, r *http.Request) (pxebeacon.MachineConfig, bool) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 16384))
 	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, ErrCodeBodyInvalid, "read body: "+err.Error(), nil)
-		return machineConfigBody{}, false
+		writeAPIError(w, http.StatusBadRequest, pxebeacon.ErrCodeBodyInvalid, "read body: "+err.Error(), nil)
+		return pxebeacon.MachineConfig{}, false
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
-	var b machineConfigBody
+	var b pxebeacon.MachineConfig
 	if err := dec.Decode(&b); err != nil {
-		writeAPIError(w, http.StatusBadRequest, ErrCodeBodyInvalid, "decode body: "+err.Error(), nil)
-		return machineConfigBody{}, false
+		writeAPIError(w, http.StatusBadRequest, pxebeacon.ErrCodeBodyInvalid, "decode body: "+err.Error(), nil)
+		return pxebeacon.MachineConfig{}, false
 	}
 	return b, true
 }
 
 // profileFromBody validates boot + resolves relative side-file paths
 // against the fleet.yaml directory (same rule as the admin form).
-func (s *Server) profileFromBody(w http.ResponseWriter, r *http.Request, b machineConfigBody) (fleet.Profile, bool) {
+func (s *Server) profileFromBody(w http.ResponseWriter, r *http.Request, b pxebeacon.MachineConfig) (fleet.Profile, bool) {
 	if !fleet.ValidBootTargets[b.Boot] {
-		writeAPIError(w, http.StatusBadRequest, ErrCodeBootInvalid,
+		writeAPIError(w, http.StatusBadRequest, pxebeacon.ErrCodeBootInvalid,
 			"unknown boot target", map[string]any{"boot": b.Boot})
 		return fleet.Profile{}, false
 	}
@@ -339,7 +268,7 @@ func (s *Server) handleAPICreateMachine(w http.ResponseWriter, r *http.Request) 
 	}
 	canon, err := fleet.CanonicalMAC(b.MAC)
 	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, ErrCodeMACInvalid,
+		writeAPIError(w, http.StatusBadRequest, pxebeacon.ErrCodeMACInvalid,
 			"invalid mac: "+err.Error(), map[string]any{"input": b.MAC})
 		return
 	}
@@ -366,7 +295,7 @@ func (s *Server) handleAPIUpdateMachine(w http.ResponseWriter, r *http.Request) 
 	raw := r.PathValue("mac")
 	canon, err := fleet.CanonicalMAC(raw)
 	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, ErrCodeMACInvalid,
+		writeAPIError(w, http.StatusBadRequest, pxebeacon.ErrCodeMACInvalid,
 			"invalid mac: "+err.Error(), map[string]any{"input": raw})
 		return
 	}
@@ -397,7 +326,7 @@ func (s *Server) handleAPIDeleteMachine(w http.ResponseWriter, r *http.Request) 
 	raw := r.PathValue("mac")
 	canon, err := fleet.CanonicalMAC(raw)
 	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, ErrCodeMACInvalid,
+		writeAPIError(w, http.StatusBadRequest, pxebeacon.ErrCodeMACInvalid,
 			"invalid mac: "+err.Error(), map[string]any{"input": raw})
 		return
 	}
@@ -419,21 +348,21 @@ func (s *Server) handleAPIDeleteMachine(w http.ResponseWriter, r *http.Request) 
 func (s *Server) writeFleetMutationError(w http.ResponseWriter, r *http.Request, mac, op string, err error) {
 	switch {
 	case errors.Is(err, fleet.ErrMACExists):
-		writeAPIError(w, http.StatusConflict, ErrCodeMACExists,
+		writeAPIError(w, http.StatusConflict, pxebeacon.ErrCodeMACExists,
 			"machine "+mac+" already exists (use PUT to update)", map[string]any{"mac": mac})
 	case errors.Is(err, fleet.ErrMACAbsent):
-		writeAPIError(w, http.StatusNotFound, ErrCodeMACNotInFleet,
+		writeAPIError(w, http.StatusNotFound, pxebeacon.ErrCodeMACNotInFleet,
 			"machine "+mac+" is not in fleet.yaml", map[string]any{"mac": mac})
 	case errors.Is(err, fleet.ErrPreconditionRequired):
-		writeAPIError(w, http.StatusPreconditionRequired, ErrCodePreconditionRequired,
+		writeAPIError(w, http.StatusPreconditionRequired, pxebeacon.ErrCodePreconditionRequired,
 			"If-Match header required (GET the resource first for its ETag)", map[string]any{"mac": mac})
 	case errors.Is(err, fleet.ErrPreconditionFailed):
-		writeAPIError(w, http.StatusPreconditionFailed, ErrCodePreconditionFailed,
+		writeAPIError(w, http.StatusPreconditionFailed, pxebeacon.ErrCodePreconditionFailed,
 			"If-Match does not match current ETag (resource changed; re-GET)", map[string]any{"mac": mac})
 	default:
 		// Validation, bad MAC, or Save failure.
 		s.log.Errorf("%s %s failed for %s: %v", op, r.URL.Path, mac, err)
-		writeAPIError(w, http.StatusInternalServerError, ErrCodeSaveFailed,
+		writeAPIError(w, http.StatusInternalServerError, pxebeacon.ErrCodeSaveFailed,
 			op+": "+err.Error(), nil)
 	}
 }
@@ -481,16 +410,16 @@ func (s *Server) handleAPIList(w http.ResponseWriter, r *http.Request) {
 	}
 	page := machines[lo:hi]
 
-	out := make([]machineAPIView, 0, len(page))
+	out := make([]pxebeacon.Machine, 0, len(page))
 	for _, m := range page {
 		out = append(out, s.buildMachineView(m.MAC, m.Profile))
 	}
-	writeJSON(w, map[string]any{
-		"pending_ttl_s": pendingTTLSeconds(s.opts.Pending),
-		"total":         total,
-		"limit":         limit,
-		"offset":        offset,
-		"machines":      out,
+	writeJSON(w, pxebeacon.ListResponse{
+		PendingTTLs: pendingTTLSeconds(s.opts.Pending),
+		Total:       total,
+		Limit:       limit,
+		Offset:      offset,
+		Machines:    out,
 	})
 }
 
@@ -504,7 +433,7 @@ func parsePaging(w http.ResponseWriter, r *http.Request) (limit, offset int, ok 
 	if v := q.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
-			writeAPIError(w, http.StatusBadRequest, ErrCodePagingInvalid,
+			writeAPIError(w, http.StatusBadRequest, pxebeacon.ErrCodePagingInvalid,
 				"limit must be a non-negative integer", map[string]any{"got": v})
 			return 0, 0, false
 		}
@@ -516,7 +445,7 @@ func parsePaging(w http.ResponseWriter, r *http.Request) (limit, offset int, ok 
 	if v := q.Get("offset"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
-			writeAPIError(w, http.StatusBadRequest, ErrCodePagingInvalid,
+			writeAPIError(w, http.StatusBadRequest, pxebeacon.ErrCodePagingInvalid,
 				"offset must be a non-negative integer", map[string]any{"got": v})
 			return 0, 0, false
 		}
@@ -525,8 +454,8 @@ func parsePaging(w http.ResponseWriter, r *http.Request) (limit, offset int, ok 
 	return limit, offset, true
 }
 
-func (s *Server) buildDesired(canon string) desiredView {
-	v := desiredView{}
+func (s *Server) buildDesired(canon string) pxebeacon.Desired {
+	v := pxebeacon.Desired{}
 	if s.opts.Pending != nil {
 		action, at, exp, ok := s.opts.Pending.Status(canon)
 		if ok {
@@ -538,8 +467,8 @@ func (s *Server) buildDesired(canon string) desiredView {
 	return v
 }
 
-func (s *Server) buildObserved(canon string) observedView {
-	v := observedView{}
+func (s *Server) buildObserved(canon string) pxebeacon.Observed {
+	v := pxebeacon.Observed{}
 	if s.opts.FleetStatus != nil {
 		for _, st := range s.opts.FleetStatus.Snapshot() {
 			if st.MAC == canon {
@@ -552,16 +481,16 @@ func (s *Server) buildObserved(canon string) observedView {
 	return v
 }
 
-func (s *Server) buildIntentView(canon string) intentView {
-	return intentView{
+func (s *Server) buildIntentView(canon string) pxebeacon.Intent {
+	return pxebeacon.Intent{
 		MAC:      canon,
 		Desired:  s.buildDesired(canon),
 		Observed: s.buildObserved(canon),
 	}
 }
 
-func (s *Server) buildMachineView(canon string, p fleet.Profile) machineAPIView {
-	return machineAPIView{
+func (s *Server) buildMachineView(canon string, p fleet.Profile) pxebeacon.Machine {
+	return pxebeacon.Machine{
 		MAC:      canon,
 		Name:     p.Name,
 		Boot:     p.Boot,
@@ -582,13 +511,13 @@ func writeJSON(w http.ResponseWriter, v any) {
 // is the HTTP status code; `code` is the stable machine-readable
 // identifier; `msg` is human prose; `details` is optional context.
 //
-// Clients should branch on `code` (one of the ErrCode* constants),
+// Clients should branch on `code` (one of the pxebeacon.ErrCode* constants),
 // not on `msg` — message text is allowed to change between releases
 // for clarity, codes are not.
-func writeAPIError(w http.ResponseWriter, status int, code, msg string, details map[string]any) {
+func writeAPIError(w http.ResponseWriter, status int, code pxebeacon.ErrCode, msg string, details map[string]any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(apiErrorView{
+	_ = json.NewEncoder(w).Encode(pxebeacon.APIError{
 		Code:    code,
 		Message: msg,
 		Details: details,
@@ -614,7 +543,7 @@ func wantsJSON(r *http.Request) bool {
 //
 // (The /admin HTML flow keeps redirectFlash until v0.9 item #3 folds
 // admin mutations into /api/v1/*.)
-func (s *Server) writeError(w http.ResponseWriter, r *http.Request, status int, code, msg string, details map[string]any) {
+func (s *Server) writeError(w http.ResponseWriter, r *http.Request, status int, code pxebeacon.ErrCode, msg string, details map[string]any) {
 	if wantsJSON(r) {
 		writeAPIError(w, status, code, msg, details)
 		return
@@ -634,10 +563,10 @@ func pendingTTLSeconds(s *pending.Store) int {
 //
 // Body: {"status":"ok","uptime_s":N,"started_at":"..."}
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{
-		"status":     "ok",
-		"uptime_s":   int(time.Since(s.startedAt).Seconds()),
-		"started_at": s.startedAt.UTC().Format(time.RFC3339),
+	writeJSON(w, pxebeacon.HealthzResponse{
+		Status:    "ok",
+		UptimeS:   int(time.Since(s.startedAt).Seconds()),
+		StartedAt: s.startedAt.UTC().Format(time.RFC3339),
 	})
 }
 
@@ -682,16 +611,16 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		ready = false
 	}
 
-	body := map[string]any{
-		"components": components,
-	}
+	body := pxebeacon.ReadyzResponse{Components: components}
 	if ready {
-		body["status"] = "ok"
+		body.Status = "ok"
 		// Counts are only meaningful when components are loaded.
-		body["pending_count"] = pendingCount(s.opts.Pending)
-		body["tracker_count"] = trackerCount(s.opts.FleetStatus)
+		pc := pendingCount(s.opts.Pending)
+		tc := trackerCount(s.opts.FleetStatus)
+		body.PendingCount = &pc
+		body.TrackerCount = &tc
 	} else {
-		body["status"] = "not_ready"
+		body.Status = "not_ready"
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

@@ -13,6 +13,7 @@ import (
 	"github.com/venkatamutyala/pxe-beacon/internal/fleet"
 	"github.com/venkatamutyala/pxe-beacon/internal/narrlog"
 	"github.com/venkatamutyala/pxe-beacon/internal/pending"
+	"github.com/venkatamutyala/pxe-beacon/pkg/pxebeacon"
 	"gopkg.in/yaml.v3"
 )
 
@@ -84,7 +85,7 @@ func TestAPI_SetIntent_Install(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("PUT install: status %d body=%s", w.Code, w.Body.String())
 	}
-	var view intentView
+	var view pxebeacon.Intent
 	decode(t, w, &view)
 	if view.Desired.Action != "install" {
 		t.Fatalf("want desired.action=install, got %+v", view)
@@ -122,7 +123,7 @@ func TestAPI_SetIntent_Null_Clears(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("PUT null: status %d body=%s", w.Code, w.Body.String())
 	}
-	var view intentView
+	var view pxebeacon.Intent
 	decode(t, w, &view)
 	if view.Desired.Action != "" {
 		t.Fatalf("want desired.action='', got %+v", view)
@@ -157,12 +158,12 @@ func TestAPI_SetIntent_UnknownMAC_404(t *testing.T) {
 	if w.Code != 404 {
 		t.Fatalf("unknown MAC: want 404, got %d body=%s", w.Code, w.Body.String())
 	}
-	var errView apiErrorView
+	var errView pxebeacon.APIError
 	decode(t, w, &errView)
 	// v0.9.0: assert structured envelope — `code` is the machine-readable
 	// field clients should branch on, `message` is prose.
-	if errView.Code != ErrCodeMACNotInFleet {
-		t.Errorf("code = %q, want %q", errView.Code, ErrCodeMACNotInFleet)
+	if errView.Code != pxebeacon.ErrCodeMACNotInFleet {
+		t.Errorf("code = %q, want %q", errView.Code, pxebeacon.ErrCodeMACNotInFleet)
 	}
 	if !strings.Contains(errView.Message, "not in fleet") {
 		t.Errorf("message missing 'not in fleet': %q", errView.Message)
@@ -185,15 +186,15 @@ func TestAPI_ErrorCodes(t *testing.T) {
 		path       string
 		body       string
 		wantStatus int
-		wantCode   string
+		wantCode   pxebeacon.ErrCode
 	}{
-		{"mac_invalid", "PUT", "/api/v1/machines/not-a-mac/intent", `{"action":"install"}`, 400, ErrCodeMACInvalid},
-		{"mac_not_in_fleet", "PUT", "/api/v1/machines/11:22:33:44:55:66/intent", `{"action":"install"}`, 404, ErrCodeMACNotInFleet},
-		{"action_missing", "PUT", "/api/v1/machines/" + mac + "/intent", `{}`, 400, ErrCodeActionMissing},
-		{"action_invalid", "PUT", "/api/v1/machines/" + mac + "/intent", `{"action":"frobnicate"}`, 400, ErrCodeActionInvalid},
-		{"action_wrong_type", "PUT", "/api/v1/machines/" + mac + "/intent", `{"action":42}`, 400, ErrCodeActionInvalid},
-		{"body_invalid", "PUT", "/api/v1/machines/" + mac + "/intent", `not json`, 400, ErrCodeBodyInvalid},
-		{"rescue_unimplemented", "PUT", "/api/v1/machines/" + mac + "/intent", `{"action":"rescue"}`, 501, ErrCodeRescueUnimplemented},
+		{"mac_invalid", "PUT", "/api/v1/machines/not-a-mac/intent", `{"action":"install"}`, 400, pxebeacon.ErrCodeMACInvalid},
+		{"mac_not_in_fleet", "PUT", "/api/v1/machines/11:22:33:44:55:66/intent", `{"action":"install"}`, 404, pxebeacon.ErrCodeMACNotInFleet},
+		{"action_missing", "PUT", "/api/v1/machines/" + mac + "/intent", `{}`, 400, pxebeacon.ErrCodeActionMissing},
+		{"action_invalid", "PUT", "/api/v1/machines/" + mac + "/intent", `{"action":"frobnicate"}`, 400, pxebeacon.ErrCodeActionInvalid},
+		{"action_wrong_type", "PUT", "/api/v1/machines/" + mac + "/intent", `{"action":42}`, 400, pxebeacon.ErrCodeActionInvalid},
+		{"body_invalid", "PUT", "/api/v1/machines/" + mac + "/intent", `not json`, 400, pxebeacon.ErrCodeBodyInvalid},
+		{"rescue_unimplemented", "PUT", "/api/v1/machines/" + mac + "/intent", `{"action":"rescue"}`, 501, pxebeacon.ErrCodeRescueUnimplemented},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -201,7 +202,7 @@ func TestAPI_ErrorCodes(t *testing.T) {
 			if w.Code != c.wantStatus {
 				t.Fatalf("status = %d, want %d. body=%s", w.Code, c.wantStatus, w.Body.String())
 			}
-			var ev apiErrorView
+			var ev pxebeacon.APIError
 			decode(t, w, &ev)
 			if ev.Code != c.wantCode {
 				t.Errorf("code = %q, want %q. body=%s", ev.Code, c.wantCode, w.Body.String())
@@ -233,10 +234,10 @@ func TestAPI_FleetNotLoaded_Returns503(t *testing.T) {
 	if w.Code != 503 {
 		t.Fatalf("fleet-not-loaded: want 503, got %d body=%s", w.Code, w.Body.String())
 	}
-	var ev apiErrorView
+	var ev pxebeacon.APIError
 	decode(t, w, &ev)
-	if ev.Code != ErrCodeFleetNotLoaded {
-		t.Errorf("code = %q, want %q", ev.Code, ErrCodeFleetNotLoaded)
+	if ev.Code != pxebeacon.ErrCodeFleetNotLoaded {
+		t.Errorf("code = %q, want %q", ev.Code, pxebeacon.ErrCodeFleetNotLoaded)
 	}
 }
 
@@ -268,7 +269,7 @@ func TestAPI_GetIntent(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("get idle: status %d", w.Code)
 	}
-	var view intentView
+	var view pxebeacon.Intent
 	decode(t, w, &view)
 	if view.Desired.Action != "" {
 		t.Errorf("idle GET should report empty desired.action, got %+v", view)
@@ -279,7 +280,7 @@ func TestAPI_GetIntent(t *testing.T) {
 		t.Fatal(err)
 	}
 	w = doLoopback(srv, "GET", "/api/v1/machines/"+mac+"/intent", "")
-	view = intentView{}
+	view = pxebeacon.Intent{}
 	decode(t, w, &view)
 	if view.Desired.Action != "install" {
 		t.Errorf("install GET should report action=install, got %+v", view)
@@ -296,7 +297,7 @@ func TestAPI_GetMachine_HasDesiredAndObserved(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("get machine: status %d", w.Code)
 	}
-	var view machineAPIView
+	var view pxebeacon.Machine
 	decode(t, w, &view)
 	if view.Name != "venkat-1" || view.Boot != "debian-12" {
 		t.Errorf("missing fleet fields: %+v", view)
@@ -315,11 +316,11 @@ func TestAPI_List(t *testing.T) {
 		t.Fatalf("list: status %d", w.Code)
 	}
 	var resp struct {
-		PendingTTLs int              `json:"pending_ttl_s"`
-		Total       int              `json:"total"`
-		Limit       int              `json:"limit"`
-		Offset      int              `json:"offset"`
-		Machines    []machineAPIView `json:"machines"`
+		PendingTTLs int                 `json:"pending_ttl_s"`
+		Total       int                 `json:"total"`
+		Limit       int                 `json:"limit"`
+		Offset      int                 `json:"offset"`
+		Machines    []pxebeacon.Machine `json:"machines"`
 	}
 	decode(t, w, &resp)
 	if len(resp.Machines) != 1 {
@@ -374,7 +375,7 @@ machines:
 	}
 	var resp struct {
 		Total, Limit, Offset int
-		Machines             []machineAPIView
+		Machines             []pxebeacon.Machine
 	}
 	decode(t, w, &resp)
 	if resp.Total != 5 {
@@ -389,7 +390,7 @@ machines:
 
 	// offset past the end → empty page, no error.
 	w = doLoopback(srv, "GET", "/api/v1/machines?offset=99", "")
-	decode(t, w, &struct{ Machines []machineAPIView }{})
+	decode(t, w, &struct{ Machines []pxebeacon.Machine }{})
 	if w.Code != 200 {
 		t.Errorf("offset-past-end: status %d, want 200", w.Code)
 	}
@@ -399,10 +400,10 @@ machines:
 	if w.Code != 400 {
 		t.Fatalf("bad limit: want 400, got %d", w.Code)
 	}
-	var ev apiErrorView
+	var ev pxebeacon.APIError
 	decode(t, w, &ev)
-	if ev.Code != ErrCodePagingInvalid {
-		t.Errorf("code = %q, want %q", ev.Code, ErrCodePagingInvalid)
+	if ev.Code != pxebeacon.ErrCodePagingInvalid {
+		t.Errorf("code = %q, want %q", ev.Code, pxebeacon.ErrCodePagingInvalid)
 	}
 }
 
@@ -498,10 +499,10 @@ func TestAPI_CRUD_FullCycle(t *testing.T) {
 	if w.Code != 409 {
 		t.Fatalf("re-create: want 409, got %d", w.Code)
 	}
-	var ev apiErrorView
+	var ev pxebeacon.APIError
 	decode(t, w, &ev)
-	if ev.Code != ErrCodeMACExists {
-		t.Errorf("code = %q, want %q", ev.Code, ErrCodeMACExists)
+	if ev.Code != pxebeacon.ErrCodeMACExists {
+		t.Errorf("code = %q, want %q", ev.Code, pxebeacon.ErrCodeMACExists)
 	}
 
 	// UPDATE without If-Match → 428
@@ -558,10 +559,10 @@ func TestAPI_CreateMachine_RejectsNonJSON(t *testing.T) {
 	if w.Code != 415 {
 		t.Fatalf("non-JSON: want 415, got %d", w.Code)
 	}
-	var ev apiErrorView
+	var ev pxebeacon.APIError
 	decode(t, w, &ev)
-	if ev.Code != ErrCodeContentType {
-		t.Errorf("code = %q, want %q", ev.Code, ErrCodeContentType)
+	if ev.Code != pxebeacon.ErrCodeContentType {
+		t.Errorf("code = %q, want %q", ev.Code, pxebeacon.ErrCodeContentType)
 	}
 }
 
@@ -668,7 +669,7 @@ func TestStatusJSON_UnifiedShape_AndDeprecated(t *testing.T) {
 		t.Errorf("status.json Link should point at successor, got %q", w.Header().Get("Link"))
 	}
 	var body struct {
-		Machines []machineAPIView `json:"machines"`
+		Machines []pxebeacon.Machine `json:"machines"`
 	}
 	decode(t, w, &body)
 	if len(body.Machines) != 1 {
