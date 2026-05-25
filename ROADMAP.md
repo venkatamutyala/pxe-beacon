@@ -72,22 +72,38 @@ Custom config via the optional `rescue:` profile field (parallel to
 global arm) — consistent with everything else and reuses the whole
 pending/dispatch path.
 
-## Next: "Secure callbacks" (features)
+## v0.12.0 — "Secure callbacks" ✅ SHIPPED
 
-**Theme:** Authenticate the phone-home callback + capture install logs.
-**Estimate:** ~1 week.
+**Shipped:** the public phone-home callback is now authenticated. Each
+served cloud-init carries a short-lived HMAC bearer token
+(`<expUnix>.<hmac(secret, mac+exp)>`, secret from
+`$PXE_BEACON_TOKEN_SECRET` with a logged random fallback, `-callback-ttl`
+default 24h); `POST /done` + `POST /log` 403 a missing/invalid one.
+Enforced by default, `-insecure-callbacks` for migration.
 
-### Items
+**Key design decision (from the conversation):** pxe-beacon **owns**
+`phone_home` rather than asking operators to add a token. It appends its
+own tokenized `phone_home` to every served cloud-init (YAML payloads;
+warns + skips on script/jinja/multipart), and **fleet load errors** if an
+operator file defines its own — chosen over silent override because a doc
+can't carry two `phone_home` keys. `/events` stays loopback-only (no
+token). Debian/RHEL installed-system callbacks: the preseed bridge
+re-fetches `/user-data` at first boot (token minted fresh then); the
+kickstart `%post` cloud-init carries the token inline.
 
-| # | Item | Why | Effort |
-|---|---|---|---|
-| 1 | **Bootstrap tokens for the phone-home callback** (`/events` + `/done` alias) | Signed token carrying its own timestamp (HMAC-SHA256 over mac+timestamp, server secret from `$PXE_BEACON_TOKEN_SECRET` with logged random fallback). Templated into cloud-init via the callback URL. Constant-time compare; mismatch → 403, no state change. Today the callback is unauthenticated. | medium |
-| 2 | **`POST /autoinstall/{mac}/log` capture endpoint** | DC's missing-diagnostic gap. Cloud-init `runcmd` posts kernel ring buffer + cloud-init logs on success AND on `errors:` hook. In-memory ring per MAC, viewable via `/api/v1/machines/{mac}/logs` (last ~64KB). Auth: the same bootstrap token as #1. | small |
+Install diagnostics: installer failure hooks (Subiquity `error-commands`,
+kickstart `%onerror`) POST logs to the token-guarded `POST /log`; read at
+`GET /api/v1/machines/{mac}/logs` (in-memory ~64 KiB/MAC, loopback-only).
+
+## Next: "Persistence + history" (features)
+
+**Theme:** State survives restart; audit log is the same journal.
+See the detailed v0.10.0-era plan below (NDJSON journal + replay +
+compaction) — still the intended shape.
 
 ### Out of scope
 
 - BMC integration + `POST /power` — deferred (see bottom).
-- Persistence — following release.
 
 ---
 

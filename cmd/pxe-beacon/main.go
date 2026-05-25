@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,8 +18,10 @@ import (
 
 	"github.com/venkatamutyala/pxe-beacon/internal/assets"
 	"github.com/venkatamutyala/pxe-beacon/internal/boot"
+	"github.com/venkatamutyala/pxe-beacon/internal/callbacktoken"
 	"github.com/venkatamutyala/pxe-beacon/internal/fleet"
 	"github.com/venkatamutyala/pxe-beacon/internal/httpd"
+	"github.com/venkatamutyala/pxe-beacon/internal/installlog"
 	"github.com/venkatamutyala/pxe-beacon/internal/narrlog"
 	"github.com/venkatamutyala/pxe-beacon/internal/netinfo"
 	"github.com/venkatamutyala/pxe-beacon/internal/pending"
@@ -63,6 +66,8 @@ func main() {
 		flagLegacyRdir    = flag.Bool("legacy-redirector", false, "v0.4.x behavior: serve a TFTP redirector that chains iPXE to HTTP /autoinstall/<mac>/autoexec.ipxe. Default (v0.5.0+) serves a self-contained dispatch script. Use this flag to bisect if v0.5.0 breaks your boot.")
 		flagClientNetmask = flag.String("client-netmask", "", "if set, the dispatch script overrides iPXE's net0/netmask after dhcp (e.g. 255.255.0.0). Use when pxe-beacon and the PXE client are on different L3 subnets that share an L2 broadcast domain (typical when the Mac is on Wi-Fi and the PXE client is on wired LAN behind the same router). Widening the netmask makes iPXE treat the wider range as local and use ARP-based direct L2 routing instead of going through the gateway.")
 		flagPendingTTL    = flag.Duration("pending-ttl", 15*time.Minute, "v0.7.1: how long a queued action (deploy / rescue) stays valid before auto-cancelling. Actions are queued per-machine via POST /api/v1/machines/{mac}/{deploy,rescue,cancel}; default = idle. Cloud-init phone_home auto-cancels. 0 disables expiry (only manual /cancel or successful install clears it).")
+		flagCallbackTTL   = flag.Duration("callback-ttl", 24*time.Hour, "v0.12.0: lifetime of the bearer token minted into each served cloud-init callback URL (/done, /log). Must comfortably exceed install→first-boot time or a slow install's callback 403s and the box reinstall-loops. Token secret comes from $PXE_BEACON_TOKEN_SECRET (random per-start fallback if unset).")
+		flagInsecureCB    = flag.Bool("insecure-callbacks", false, "v0.12.0: accept callbacks to /done and /log even WITHOUT a valid token (a present-but-invalid token is still rejected). Default false = enforce. Use only while migrating custom templates to carry ?t={{.CallbackToken}}.")
 		flagPrintVer      = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Usage = func() {
@@ -128,6 +133,23 @@ func main() {
 	// (or /rescue, when wired) to queue an action; cloud-init
 	// phone_home auto-cancels.
 	pendSt := pending.New(*flagPendingTTL)
+
+	// v0.12.0: bearer-token signer guarding the public phone-home
+	// callbacks, plus the in-memory install-log ring. The secret comes
+	// from $PXE_BEACON_TOKEN_SECRET so tokens survive a restart; a
+	// random per-start fallback keeps dev working but invalidates
+	// in-flight tokens across restarts (logged loudly).
+	tokenSecret := []byte(os.Getenv("PXE_BEACON_TOKEN_SECRET"))
+	if len(tokenSecret) == 0 {
+		tokenSecret = make([]byte, 32)
+		if _, err := rand.Read(tokenSecret); err != nil {
+			log.Errorf("generate callback-token secret: %v", err)
+			os.Exit(1)
+		}
+		log.Warnf("PXE_BEACON_TOKEN_SECRET unset — using a random per-start secret; callback tokens minted before a restart will be rejected after it (risking a reinstall loop for a slow install). Set $PXE_BEACON_TOKEN_SECRET in production.")
+	}
+	callbackSigner := callbacktoken.New(tokenSecret, *flagCallbackTTL)
+	installLog := installlog.New()
 
 	cfg := proxydhcp.Config{
 		AdvertisedIP:   advIP,
@@ -201,22 +223,25 @@ func main() {
 	}
 
 	httpSrv, err := httpd.New(httpd.Options{
-		Listen:         fmt.Sprintf("%s:%d", *flagListen, *flagHTTPPort),
-		AdvertisedIP:   advIP.String(),
-		HTTPPort:       *flagHTTPPort,
-		ChainURL:       *flagChainURL,
-		IPXEScriptPath: cfg.IPXEScriptPath,
-		IPXEScriptFile: *flagIPXEScript,
-		SetCrossCert:   *flagCrossCert,
-		Logger:         log,
-		Tracker:        lst,
-		Fleet:          fl,
-		FleetStatus:    statusTracker,
-		DataDir:        *flagDataDir,
-		TFTPAutoexec:   autoexecFn,
-		IPXEDispatch:   autoexecFn,
-		ClientNetmask:  *flagClientNetmask,
-		Pending:        pendSt,
+		Listen:               fmt.Sprintf("%s:%d", *flagListen, *flagHTTPPort),
+		AdvertisedIP:         advIP.String(),
+		HTTPPort:             *flagHTTPPort,
+		ChainURL:             *flagChainURL,
+		IPXEScriptPath:       cfg.IPXEScriptPath,
+		IPXEScriptFile:       *flagIPXEScript,
+		SetCrossCert:         *flagCrossCert,
+		Logger:               log,
+		Tracker:              lst,
+		Fleet:                fl,
+		FleetStatus:          statusTracker,
+		DataDir:              *flagDataDir,
+		TFTPAutoexec:         autoexecFn,
+		IPXEDispatch:         autoexecFn,
+		ClientNetmask:        *flagClientNetmask,
+		Pending:              pendSt,
+		CallbackTokens:       callbackSigner,
+		RequireCallbackToken: !*flagInsecureCB,
+		InstallLog:           installLog,
 	})
 	if err != nil {
 		log.Errorf("init http: %v", err)
@@ -225,7 +250,7 @@ func main() {
 
 	// SIGHUP triggers a fleet config reload (no-op for Empty fleet).
 	if *flagConfig != "" {
-		go watchSIGHUP(ctx, fl, pendSt, log)
+		go watchSIGHUP(ctx, fl, pendSt, installLog, log)
 	}
 
 	errc := make(chan error, 3)
@@ -264,7 +289,7 @@ func main() {
 // v0.8.1: after a successful reload, the pending store also drops
 // any entries for MACs no longer in the fleet, so removing a machine
 // from fleet.yaml cleanly cancels its queued intent.
-func watchSIGHUP(ctx context.Context, fl *fleet.Fleet, pendSt *pending.Store, log *narrlog.Logger) {
+func watchSIGHUP(ctx context.Context, fl *fleet.Fleet, pendSt *pending.Store, installLog *installlog.Store, log *narrlog.Logger) {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGHUP)
 	defer signal.Stop(ch)
@@ -278,14 +303,17 @@ func watchSIGHUP(ctx context.Context, fl *fleet.Fleet, pendSt *pending.Store, lo
 				log.Errorf("fleet reload failed: %v (keeping previous config)", err)
 				continue
 			}
+			machines := fl.Machines()
+			known := func(mac string) bool { _, ok := machines[mac]; return ok }
 			if pendSt != nil {
-				machines := fl.Machines()
-				removed, dropped := pendSt.RetainOnly(func(mac string) bool {
-					_, ok := machines[mac]
-					return ok
-				})
+				removed, dropped := pendSt.RetainOnly(known)
 				if removed > 0 {
 					log.Infof("reload: dropped %d pending intent(s) for removed MAC(s): %v", removed, dropped)
+				}
+			}
+			if installLog != nil {
+				if removed := installLog.RetainOnly(known); removed > 0 {
+					log.Infof("reload: dropped install logs for %d removed MAC(s)", removed)
 				}
 			}
 		}

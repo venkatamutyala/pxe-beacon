@@ -17,9 +17,6 @@ fqdn: {{.Name}}.local
 disable_root: false
 ssh_pwauth: true
 
-# Phone home so pxe-beacon's /status flips this machine to
-# installer-done. The retry loop covers boot-time DHCP flakiness.
-phone_home:
-  url: http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}/done
-  post: all
-  tries: 10
+# NOTE: do NOT add a `phone_home:` here. pxe-beacon appends its own
+# tokenized phone_home to every served cloud-init (it owns the callback);
+# defining your own makes fleet load fail (a doc can't have two).

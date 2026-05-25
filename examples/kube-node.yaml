@@ -30,10 +30,11 @@ autoinstall:
   late-commands:
     - curtin in-target -- systemctl enable containerd
 
-# pxe-beacon receives a POST when the install finishes, transitioning
-# this machine to `installer-done` on /status. Keep the URL; the
-# template fills the rest.
-phone_home:
-  url: http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}/done
-  post: all
-  tries: 10
+  # On install failure, ship the installer logs to pxe-beacon so the
+  # failure is visible at GET /api/v1/machines/{mac}/logs. Best-effort.
+  error-commands:
+    - 'curl -fsS -X POST --data-binary @/var/log/installer/subiquity-server-debug.log "http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}/log{{if .CallbackToken}}?t={{.CallbackToken}}{{end}}" || true'
+
+# Do NOT add a phone_home here — pxe-beacon appends its own tokenized
+# phone_home to every served cloud-init (it owns the callback). Defining
+# your own makes fleet load fail.

@@ -17,7 +17,9 @@ import (
 	"time"
 
 	"github.com/venkatamutyala/pxe-beacon/internal/assets"
+	"github.com/venkatamutyala/pxe-beacon/internal/callbacktoken"
 	"github.com/venkatamutyala/pxe-beacon/internal/fleet"
+	"github.com/venkatamutyala/pxe-beacon/internal/installlog"
 	"github.com/venkatamutyala/pxe-beacon/internal/narrlog"
 )
 
@@ -188,8 +190,10 @@ func TestHTTP_CrossCertEmittedWhenEnabled(t *testing.T) {
 func startFleetServer(t *testing.T) (addr string, f *fleet.Fleet, tr *fleet.Tracker, cleanup func()) {
 	t.Helper()
 	dir := t.TempDir()
+	// No phone_home here — pxe-beacon appends its own (v0.12.0 owns it;
+	// fleet load rejects operator-defined phone_home).
 	if err := os.WriteFile(filepath.Join(dir, "ubuntu.yaml"),
-		[]byte("#cloud-config\nidentity:\n  username: ops\n  hostname: {{.Name}}\nphone_home:\n  url: http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}/done\n  post: all\n"),
+		[]byte("#cloud-config\nidentity:\n  username: ops\n  hostname: {{.Name}}\n"),
 		0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -447,6 +451,134 @@ func portOf(addr string) string {
 	return p
 }
 
+// startSecureServer boots a fleet server with the v0.12.0 callback-token
+// feature wired (enforced) + install-log store. Returns addr, the signer
+// (to mint valid tokens), and the log store.
+func startSecureServer(t *testing.T) (addr string, signer *callbacktoken.Signer, ilog *installlog.Store) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fleet.yaml"), []byte(`
+machines:
+  - mac: 58:47:ca:70:c7:c9
+    name: venkat-1
+    boot: debian-12
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logBuf := &bytes.Buffer{}
+	log := narrlog.New("test", narrlog.LevelDebug, logBuf)
+	f, err := fleet.Load(filepath.Join(dir, "fleet.yaml"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := fleet.NewTracker(f, 5*time.Second)
+	signer = callbacktoken.New([]byte("test-secret"), time.Hour)
+	ilog = installlog.New()
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	addr = ln.Addr().String()
+	_, portStr, _ := net.SplitHostPort(addr)
+	port, _ := strconv.Atoi(portStr)
+	_ = ln.Close()
+	s, err := New(Options{
+		Listen: addr, AdvertisedIP: "10.0.0.5", HTTPPort: port,
+		Logger: log, Fleet: f, FleetStatus: tr,
+		CallbackTokens: signer, RequireCallbackToken: true, InstallLog: ilog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = s.Serve(ctx); close(done) }()
+	time.Sleep(80 * time.Millisecond)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+		t.Logf("log dump:\n%s", logBuf.String())
+	})
+	return addr, signer, ilog
+}
+
+func TestHTTP_Callback_EnforcesToken(t *testing.T) {
+	addr, signer, _ := startSecureServer(t)
+	mac := "58:47:ca:70:c7:c9"
+	base := "http://" + addr + "/autoinstall/58-47-ca-70-c7-c9/done"
+
+	// No token → 403.
+	r1, _ := http.Post(base, "application/json", strings.NewReader("{}"))
+	if r1.StatusCode != http.StatusForbidden {
+		t.Errorf("no-token /done = %d, want 403", r1.StatusCode)
+	}
+	r1.Body.Close()
+
+	// Bogus token → 403.
+	r2, _ := http.Post(base+"?t=123.deadbeef", "application/json", strings.NewReader("{}"))
+	if r2.StatusCode != http.StatusForbidden {
+		t.Errorf("bad-token /done = %d, want 403", r2.StatusCode)
+	}
+	r2.Body.Close()
+
+	// Valid token → 200.
+	tok := signer.Mint(mac)
+	r3, _ := http.Post(base+"?t="+tok, "application/json", strings.NewReader("{}"))
+	if r3.StatusCode != http.StatusOK {
+		t.Errorf("valid-token /done = %d, want 200", r3.StatusCode)
+	}
+	r3.Body.Close()
+}
+
+func TestHTTP_UserData_AppendsTokenizedPhoneHome(t *testing.T) {
+	addr, signer, _ := startSecureServer(t)
+	resp, err := http.Get("http://" + addr + "/autoinstall/58-47-ca-70-c7-c9/user-data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	if !strings.Contains(s, "phone_home:") {
+		t.Fatalf("served cloud-init missing appended phone_home:\n%s", s)
+	}
+	// Pull ?t=<token> out of the appended URL and verify it.
+	i := strings.Index(s, "/done?t=")
+	if i < 0 {
+		t.Fatalf("appended phone_home URL has no token:\n%s", s)
+	}
+	tok := strings.TrimSpace(s[i+len("/done?t="):])
+	if nl := strings.IndexByte(tok, '\n'); nl >= 0 {
+		tok = tok[:nl]
+	}
+	if err := signer.Verify("58:47:ca:70:c7:c9", tok); err != nil {
+		t.Errorf("appended token failed verification: %v", err)
+	}
+}
+
+func TestHTTP_Log_CaptureAndRead(t *testing.T) {
+	addr, signer, _ := startSecureServer(t)
+	mac := "58:47:ca:70:c7:c9"
+	tok := signer.Mint(mac)
+	// Post logs with the token.
+	r, _ := http.Post("http://"+addr+"/autoinstall/58-47-ca-70-c7-c9/log?t="+tok,
+		"text/plain", strings.NewReader("kernel panic: it broke"))
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("POST /log = %d, want 200", r.StatusCode)
+	}
+	r.Body.Close()
+	// Read back via the loopback-only API.
+	g, _ := http.Get("http://" + addr + "/api/v1/machines/58:47:ca:70:c7:c9/logs")
+	if g.StatusCode != http.StatusOK {
+		t.Fatalf("GET /logs = %d, want 200", g.StatusCode)
+	}
+	got, _ := io.ReadAll(g.Body)
+	g.Body.Close()
+	if !strings.Contains(string(got), "kernel panic: it broke") {
+		t.Errorf("logs missing posted content: %q", got)
+	}
+}
+
 func TestHTTP_InstallerDonePhoneHome(t *testing.T) {
 	addr, _, tr, _ := startFleetServer(t)
 	resp, err := http.Post("http://"+addr+"/autoinstall/58-47-ca-70-c7-c9/done", "application/json", strings.NewReader("{}"))
@@ -539,8 +671,9 @@ func TestHTTP_FleetRoutes_503WithoutConfig(t *testing.T) {
 func startFleetServerWithPreseed(t *testing.T) (string, *fleet.Tracker) {
 	t.Helper()
 	dir := t.TempDir()
+	// No phone_home — pxe-beacon appends its own tokenized one (v0.12.0).
 	if err := os.WriteFile(filepath.Join(dir, "user-data.yaml"),
-		[]byte("#cloud-config\nhostname: {{.Name}}\nphone_home: {url: http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}/done}\n"),
+		[]byte("#cloud-config\nhostname: {{.Name}}\n"),
 		0o644); err != nil {
 		t.Fatal(err)
 	}

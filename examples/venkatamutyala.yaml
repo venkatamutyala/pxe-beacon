@@ -37,13 +37,3 @@ runcmd:
   # 5. Reload sshd so the new opkssh AuthorizedKeysCommand wiring takes
   #    effect without dropping existing connections.
   - [systemctl, reload, ssh]
-
-# 6. (Optional) Phone home when the install completes so pxe-beacon's
-#    /status page flips this machine to `installer-done`. Safe to
-#    enable on any pxe-beacon-served install — if pxe-beacon isn't
-#    reachable, cloud-init retries `tries` times and then moves on.
-#
-# phone_home:
-#   url: http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}/done
-#   post: all
-#   tries: 10

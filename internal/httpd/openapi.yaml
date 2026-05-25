@@ -13,7 +13,7 @@ info:
 
     Errors use a structured envelope `{code, message, details?}`.
     Branch on `code` (stable); `message` prose may be reworded.
-  version: "0.11.0"
+  version: "0.12.0"
 servers:
   - url: http://localhost:8080
     description: loopback (default)
@@ -165,6 +165,22 @@ paths:
               schema: { $ref: "#/components/schemas/Machine" }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /api/v1/machines/{mac}/logs:
+    parameters:
+      - { name: mac, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Read captured install diagnostics (v0.12.0)
+      description: >
+        Returns the most recent ~64 KiB of diagnostic output posted by the
+        installer to the public, token-authenticated POST
+        /autoinstall/{mac}/log endpoint (kernel ring buffer + installer /
+        cloud-init logs). In-memory and cleared on restart. Loopback-only.
+      responses:
+        "200":
+          description: log tail
+          content:
+            text/plain:
+              schema: { type: string }
   /healthz:
     get:
       summary: Liveness probe

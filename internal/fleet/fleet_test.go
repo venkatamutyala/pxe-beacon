@@ -166,6 +166,42 @@ machines:
 	}
 }
 
+func TestLoad_RejectsOperatorPhoneHome(t *testing.T) {
+	// v0.12.0: pxe-beacon owns phone_home; an operator cloud_init that
+	// defines its own (even with unrendered template placeholders) must
+	// be rejected at load with a clear message.
+	dir := t.TempDir()
+	writeFile(t, dir, "ci.yaml", "#cloud-config\nhostname: {{.Name}}\nphone_home:\n  url: http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}/done\n")
+	cfg := writeFile(t, dir, "fleet.yaml", `
+machines:
+  - mac: 58:47:ca:70:c7:c9
+    boot: debian-12
+    cloud_init: ./ci.yaml
+`)
+	_, err := Load(cfg, newLog())
+	if err == nil {
+		t.Fatal("expected error: operator-defined phone_home should be rejected")
+	}
+	if !strings.Contains(err.Error(), "phone_home") {
+		t.Errorf("error should mention phone_home, got: %v", err)
+	}
+}
+
+func TestLoad_AllowsCommentedPhoneHome(t *testing.T) {
+	// A commented-out phone_home (column-0 `# phone_home:`) is fine.
+	dir := t.TempDir()
+	writeFile(t, dir, "ci.yaml", "#cloud-config\nhostname: {{.Name}}\n# phone_home: disabled\n")
+	cfg := writeFile(t, dir, "fleet.yaml", `
+machines:
+  - mac: 58:47:ca:70:c7:c9
+    boot: debian-12
+    cloud_init: ./ci.yaml
+`)
+	if _, err := Load(cfg, newLog()); err != nil {
+		t.Fatalf("commented phone_home should not be rejected: %v", err)
+	}
+}
+
 func TestLoad_RejectsBadBootTarget(t *testing.T) {
 	dir := t.TempDir()
 	cfg := writeFile(t, dir, "fleet.yaml", `

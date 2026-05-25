@@ -127,6 +127,7 @@ const (
 	ErrCodeBodyInvalid          ErrCode = "body_invalid"
 	ErrCodeActionMissing        ErrCode = "action_missing"
 	ErrCodeActionInvalid        ErrCode = "action_invalid"
+	ErrCodeCallbackToken        ErrCode = "callback_token_invalid"
 	ErrCodePendingFailed        ErrCode = "pending_failed"
 	ErrCodePagingInvalid        ErrCode = "paging_invalid"
 	ErrCodeContentType          ErrCode = "content_type_unsupported"

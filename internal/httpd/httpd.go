@@ -25,10 +25,13 @@ import (
 	"github.com/venkatamutyala/pxe-beacon/internal/assets"
 	"github.com/venkatamutyala/pxe-beacon/internal/boot"
 	"github.com/venkatamutyala/pxe-beacon/internal/cache"
+	"github.com/venkatamutyala/pxe-beacon/internal/callbacktoken"
 	"github.com/venkatamutyala/pxe-beacon/internal/fleet"
+	"github.com/venkatamutyala/pxe-beacon/internal/installlog"
 	"github.com/venkatamutyala/pxe-beacon/internal/narrlog"
 	"github.com/venkatamutyala/pxe-beacon/internal/pending"
 	"github.com/venkatamutyala/pxe-beacon/pkg/pxebeacon"
+	"gopkg.in/yaml.v3"
 )
 
 //go:embed status.html
@@ -93,6 +96,19 @@ type Options struct {
 	// member is effectively pending-deploy, matching <= v0.6.x).
 	// v0.7.1+ (was ArmState in v0.7.0).
 	Pending *pending.Store
+	// CallbackTokens mints + verifies the bearer tokens guarding the
+	// public phone-home callbacks (/done, /log). When nil the token
+	// feature is off: handlers serve untokenized callback URLs and the
+	// verify middleware is a no-op. v0.12.0+.
+	CallbackTokens *callbacktoken.Signer
+	// RequireCallbackToken, when true, rejects a missing/invalid token
+	// on /done + /log with 403. When false (advisory), a MISSING token
+	// is accepted + logged but a PRESENT-but-invalid one is still
+	// rejected. Ignored when CallbackTokens is nil. v0.12.0+.
+	RequireCallbackToken bool
+	// InstallLog holds per-MAC diagnostic log tails posted to /log.
+	// When nil, /log + /logs 404. v0.12.0+.
+	InstallLog *installlog.Store
 }
 
 // Server is the pxe-beacon HTTP server.
@@ -214,10 +230,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /autoinstall/{mac}/sysrescue.yaml", s.handleSysrescueConfig)
 	s.mux.HandleFunc("GET /autoinstall/{mac}/sysrescue-setup.sh", s.handleSysrescueSetup)
 	// v0.9.0: /done is the cloud-init phone_home wire endpoint (kept as
-	// a permanent alias); /events is the canonical API form. Both route
-	// to the same handler.
-	s.mux.HandleFunc("POST /autoinstall/{mac}/done", s.handleInstallEvent)
+	// a permanent alias); /events is the canonical API form. /done is
+	// public (the booting box posts to it) so it's token-guarded;
+	// /events is loopback-only (operator/API) so it isn't.
+	s.mux.Handle("POST /autoinstall/{mac}/done", s.requireCallbackToken(http.HandlerFunc(s.handleInstallEvent)))
 	s.mux.Handle("POST /api/v1/machines/{mac}/events", loopbackOnly(http.HandlerFunc(s.handleInstallEvent)))
+	// v0.12.0: public diagnostic-log capture (token-guarded) + the
+	// loopback-only reader.
+	s.mux.Handle("POST /autoinstall/{mac}/log", s.requireCallbackToken(http.HandlerFunc(s.handleInstallLog)))
+	s.mux.Handle("GET /api/v1/machines/{mac}/logs", loopbackOnly(http.HandlerFunc(s.handleGetLogs)))
 	s.mux.HandleFunc("GET /status", s.handleStatusHTML)
 	s.mux.HandleFunc("GET /status.json", s.handleStatusJSON)
 
@@ -408,19 +429,36 @@ func (s *Server) handleUserData(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("parse cloud_init template: %v", err), http.StatusInternalServerError)
 		return
 	}
+	token := s.mintCallbackToken(mac)
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, map[string]any{
-		"Name":         p.Name,
-		"MAC":          mac,
-		"MACHyp":       strings.ReplaceAll(mac, ":", "-"),
-		"AdvertisedIP": s.opts.AdvertisedIP,
-		"HTTPPort":     s.opts.HTTPPort,
-		"Params":       p.Params,
+		"Name":          p.Name,
+		"MAC":           mac,
+		"MACHyp":        strings.ReplaceAll(mac, ":", "-"),
+		"AdvertisedIP":  s.opts.AdvertisedIP,
+		"HTTPPort":      s.opts.HTTPPort,
+		"Params":        p.Params,
+		"CallbackToken": token,
 	}); err != nil {
 		http.Error(w, fmt.Sprintf("render cloud_init: %v", err), http.StatusInternalServerError)
 		return
 	}
 	body := buf.Bytes()
+	// v0.12.0: pxe-beacon OWNS phone_home. Append the tokenized callback
+	// so the operator never writes one (fleet load rejects it if they
+	// do). YAML only — a non-cloud-config payload (shell/jinja/multipart)
+	// can't take an appended block, so warn + serve it untouched.
+	if block := s.cloudInitPhoneHome(mac, token); block != nil {
+		if isYAMLCloudConfig(body) {
+			if !bytes.HasSuffix(body, []byte("\n")) {
+				body = append(body, '\n')
+			}
+			body = append(body, block...)
+		} else {
+			s.log.Warnf("GET %s: cloud-init payload for %s is not #cloud-config/autoinstall YAML; skipping phone_home injection (machine won't auto-report installer-done)",
+				r.URL.Path, mac)
+		}
+	}
 	w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	_, _ = w.Write(body)
@@ -429,6 +467,40 @@ func (s *Server) handleUserData(w http.ResponseWriter, r *http.Request) {
 		s.opts.Tracker.NoteServed("user-data-anon")
 	}
 	s.log.Infof("GET %s -> 200, %d bytes [client=%s]", r.URL.Path, len(body), labelOf(p.Name, mac))
+}
+
+// cloudInitPhoneHome builds the pxe-beacon-owned phone_home block appended
+// to every served cloud-init. The token (when the feature is on) rides the
+// URL query — cloud-init's phone_home can't set headers.
+func (s *Server) cloudInitPhoneHome(mac, token string) []byte {
+	url := fmt.Sprintf("http://%s:%d/autoinstall/%s/done",
+		s.opts.AdvertisedIP, s.opts.HTTPPort, strings.ReplaceAll(mac, ":", "-"))
+	if token != "" {
+		url += "?t=" + token
+	}
+	return []byte(fmt.Sprintf(`
+# phone_home appended by pxe-beacon — it owns this callback (carries the
+# auth token). Do NOT define your own phone_home; fleet load rejects it.
+phone_home:
+  url: %s
+  post: all
+  tries: 10
+`, url))
+}
+
+// isYAMLCloudConfig reports whether b is a cloud-config / Subiquity
+// autoinstall YAML document we can safely append a top-level phone_home to.
+// Shell-script (#!), jinja, and MIME-multipart user-data are not.
+func isYAMLCloudConfig(b []byte) bool {
+	t := strings.TrimSpace(string(b))
+	switch {
+	case strings.HasPrefix(t, "#!"),
+		strings.HasPrefix(t, "## template: jinja"),
+		strings.HasPrefix(t, "Content-Type: multipart"):
+		return false
+	}
+	var m map[string]any
+	return yaml.Unmarshal(b, &m) == nil && m != nil
 }
 
 // handlePreseed serves a Debian preseed.cfg for the requesting MAC.
@@ -467,6 +539,7 @@ func (s *Server) handlePreseed(w http.ResponseWriter, r *http.Request) {
 		"ClientNetmask":    s.opts.ClientNetmask,
 		"WiderNetworkCIDR": widerNetworkCIDR(s.opts.AdvertisedIP, s.opts.ClientNetmask),
 		"Params":           p.Params,
+		"CallbackToken":    s.mintCallbackToken(mac),
 	}
 
 	var body []byte
@@ -581,6 +654,7 @@ func (s *Server) handleKickstart(w http.ResponseWriter, r *http.Request) {
 		"ClientNetmask":    s.opts.ClientNetmask,
 		"WiderNetworkCIDR": widerNetworkCIDR(s.opts.AdvertisedIP, s.opts.ClientNetmask),
 		"RepoBaseURL":      repoBase,
+		"CallbackToken":    s.mintCallbackToken(mac),
 	}
 
 	var body []byte
@@ -840,6 +914,95 @@ func (s *Server) handleInstallEvent(w http.ResponseWriter, r *http.Request) {
 	body := "ok\n"
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	_, _ = io.WriteString(w, body)
+}
+
+// mintCallbackToken returns a bearer token for canonMAC, or "" when the
+// token feature is disabled (CallbackTokens nil). Templated into served
+// callback URLs as {{.CallbackToken}}.
+func (s *Server) mintCallbackToken(canonMAC string) string {
+	if s.opts.CallbackTokens == nil {
+		return ""
+	}
+	return s.opts.CallbackTokens.Mint(canonMAC)
+}
+
+// requireCallbackToken guards the public callbacks (/done, /log). It reads
+// the token from the `t` query param and verifies it against the path MAC.
+//
+//   - token feature off (CallbackTokens nil) → pass through.
+//   - present-but-invalid token → 403 ALWAYS (forged/expired is never ok).
+//   - missing token → 403 if RequireCallbackToken, else accept + warn
+//     (advisory mode, so operators can roll out before enforcing).
+func (s *Server) requireCallbackToken(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.opts.CallbackTokens == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		mac, err := fleet.CanonicalMAC(r.PathValue("mac"))
+		if err != nil {
+			s.writeError(w, r, http.StatusBadRequest, pxebeacon.ErrCodeMACInvalid,
+				"invalid MAC in path", map[string]any{"mac": r.PathValue("mac")})
+			return
+		}
+		tok := r.URL.Query().Get("t")
+		if tok == "" {
+			if s.opts.RequireCallbackToken {
+				s.log.Warnf("audit event=callback-rejected reason=missing-token target_mac=%s from=%s path=%s",
+					mac, r.RemoteAddr, r.URL.Path)
+				s.writeError(w, r, http.StatusForbidden, pxebeacon.ErrCodeCallbackToken,
+					"missing callback token", map[string]any{"mac": mac})
+				return
+			}
+			s.log.Warnf("audit event=callback-unauthenticated reason=missing-token target_mac=%s from=%s path=%s (advisory mode; set -require-callback-token to enforce)",
+				mac, r.RemoteAddr, r.URL.Path)
+			next.ServeHTTP(w, r)
+			return
+		}
+		if err := s.opts.CallbackTokens.Verify(mac, tok); err != nil {
+			s.log.Warnf("audit event=callback-rejected reason=%v target_mac=%s from=%s path=%s",
+				err, mac, r.RemoteAddr, r.URL.Path)
+			s.writeError(w, r, http.StatusForbidden, pxebeacon.ErrCodeCallbackToken,
+				"invalid callback token", map[string]any{"mac": mac})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// handleInstallLog captures diagnostic output an installer posts to
+// /autoinstall/{mac}/log (token-guarded by the middleware). Body is raw
+// text (dmesg + installer/cloud-init logs); we keep the tail per MAC.
+func (s *Server) handleInstallLog(w http.ResponseWriter, r *http.Request) {
+	if s.opts.InstallLog == nil {
+		http.Error(w, "log capture disabled", http.StatusNotFound)
+		return
+	}
+	mac := s.extractMAC(w, r)
+	if mac == "" {
+		return
+	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, installlog.MaxPerMAC))
+	s.opts.InstallLog.Append(mac, body)
+	s.log.Infof("audit event=install-log target_mac=%s bytes=%d from=%s", mac, len(body), r.RemoteAddr)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = io.WriteString(w, "ok\n")
+}
+
+// handleGetLogs returns a MAC's retained log tail as text/plain. Loopback-only.
+func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
+	if s.opts.InstallLog == nil {
+		http.Error(w, "log capture disabled", http.StatusNotFound)
+		return
+	}
+	mac := s.extractMAC(w, r)
+	if mac == "" {
+		return
+	}
+	body := s.opts.InstallLog.Get(mac)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	_, _ = w.Write(body)
 }
 
 // parseEventPhase pulls the optional phase + reason from either a JSON

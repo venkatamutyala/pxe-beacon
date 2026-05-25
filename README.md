@@ -332,6 +332,7 @@ Full REST surface (loopback-only — see security model below):
 | `PUT`    | `/api/v1/machines/{mac}/intent` | set desired action (`install`, `rescue`, or `null`) |
 | `GET`    | `/api/v1/machines/{mac}/intent` | read desired + observed |
 | `POST`   | `/api/v1/machines/{mac}/events` | report install lifecycle (`installer-done`/`installer-failed`); JSON or form |
+| `GET`    | `/api/v1/machines/{mac}/logs` | read captured install diagnostics (last ~64 KiB; see Secure callbacks) |
 | `GET`    | `/openapi.yaml` | the OpenAPI 3 spec for the above |
 | `GET`    | `/healthz`, `/readyz` | liveness / readiness probes |
 
@@ -372,6 +373,48 @@ Terraform / Ansible / React Query map cleanly to it. Unknown MACs
 (not in `fleet.yaml`) cannot have intent set and keep their
 netboot.xyz fallback, so booting a random box doesn't require any
 prior queueing.
+
+#### Secure callbacks (v0.12.0+)
+
+The booting machine reports "install done" by POSTing to the **public**
+`POST /autoinstall/{mac}/done`. Before v0.12.0 that was unauthenticated —
+any host on the LAN could flip another machine's state. Now each served
+cloud-init carries a short-lived **bearer token**, and `/done` (plus the
+new `/log`) reject a missing/invalid one with 403.
+
+**pxe-beacon owns `phone_home`.** It appends its own tokenized
+`phone_home` block to every cloud-init it serves, so you never write one.
+Defining your own makes fleet load fail (a cloud-config can't have two
+`phone_home` keys, and pxe-beacon's must carry the token):
+
+```
+machine "kube-1": cloud_init ./kube-node.yaml defines phone_home —
+remove it; pxe-beacon appends its own tokenized phone_home.
+```
+
+The token:
+
+- is `<expUnix>.<hmac-sha256(secret, mac+exp)>`, bound to one MAC, minted
+  at serve time, valid for `-callback-ttl` (default **24h** — must outlast
+  install→first-boot or a slow install's callback 403s and the box
+  reinstall-loops).
+- secret comes from **`$PXE_BEACON_TOKEN_SECRET`** (set this in production
+  so tokens survive a restart; an unset secret falls back to a random
+  per-start value and logs a warning).
+- travels in the callback URL over plaintext LAN HTTP — it's a bearer
+  token, **not** crypto-grade auth without TLS. It raises the bar from
+  "any host can spoof any MAC" to "you must have seen that MAC's served
+  config", consistent with the trusted-LAN model.
+
+Enforcement is on by default; `-insecure-callbacks` accepts a *missing*
+token (a present-but-invalid one is always rejected) while you migrate
+custom templates to carry `?t={{.CallbackToken}}`.
+
+**Install diagnostics.** Installer failure hooks (Subiquity `error-commands`,
+kickstart `%onerror`) POST the kernel ring buffer + logs to the
+token-guarded `POST /autoinstall/{mac}/log`; read the last ~64 KiB at
+`GET /api/v1/machines/{mac}/logs` (loopback-only, in-memory, cleared on
+restart). Closes the "it failed and I have no idea why" gap.
 
 #### Rescue mode (v0.11.0+)
 
@@ -515,6 +558,8 @@ minutes get a ⚠ stalled flag. JSON version at `/status.json`.
 | `-hint-after`    | `10s`                                         | fire the "client never fetched" hint after this        |
 | `-data-dir`      | `~/.local/share/pxe-beacon`                   | dir holding `pxe-beacon fetch` output, served at `/assets/` |
 | `-pending-ttl`   | `15m`                                         | how long a queued deploy / rescue stays valid before auto-cancel (`0` = no expiry) |
+| `-callback-ttl`  | `24h`                                         | lifetime of the callback bearer token (see Secure callbacks) |
+| `-insecure-callbacks` | off                                      | accept callbacks without a token (present-but-invalid still rejected) |
 | `-loglevel`      | `info`                                        | `error`, `warn`, `info`, `debug`                       |
 
 `./pxe-beacon -help` for the full list. See [`RUN.md`](./RUN.md) for

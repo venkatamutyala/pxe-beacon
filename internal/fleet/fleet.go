@@ -369,7 +369,38 @@ func validateProfile(p Profile, ctx string) error {
 			return fmt.Errorf("%s: rescue %s: %w", ctx, p.Rescue, err)
 		}
 	}
+	// v0.12.0: pxe-beacon owns the cloud-init phone_home callback (it
+	// carries the auth token, and a doc can't have two phone_home keys).
+	// Reject an operator file that defines its own rather than silently
+	// clobbering it during a PXE boot.
+	if p.CloudInit != "" && cloudInitDefinesPhoneHome(p.CloudInit) {
+		return fmt.Errorf("%s: cloud_init %s defines phone_home — remove it; pxe-beacon appends its own tokenized phone_home (it owns the callback). See the README 'Secure callbacks' section",
+			ctx, p.CloudInit)
+	}
 	return nil
+}
+
+// cloudInitDefinesPhoneHome reports whether the file at path declares a
+// top-level `phone_home:` key. It scans for a column-0 `phone_home:` line
+// rather than parsing YAML, because operator cloud-init files carry
+// unrendered Go-template placeholders ({{.Name}}) that aren't valid YAML
+// until pxe-beacon renders them at serve time. phone_home is always a
+// top-level cloud-config module, so a column-0 match is the right signal;
+// commented (`# phone_home:`) and nested lines are correctly ignored.
+func cloudInitDefinesPhoneHome(path string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(line, "phone_home") {
+			continue // column-0 only: skip comments (# ...) and nested keys
+		}
+		if rest := strings.TrimSpace(strings.TrimPrefix(line, "phone_home")); strings.HasPrefix(rest, ":") {
+			return true
+		}
+	}
+	return false
 }
 
 // Lookup resolves a MAC (in any common format) to a Profile. Unknown

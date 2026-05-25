@@ -15,7 +15,6 @@ packages:
   - vim
   - curl
 
-phone_home:
-  url: http://{{.AdvertisedIP}}:{{.HTTPPort}}/autoinstall/{{.MACHyp}}/done
-  post: all
-  tries: 10
+# Do NOT add a phone_home here — pxe-beacon appends its own tokenized
+# phone_home to every served cloud-init (it owns the callback). Defining
+# your own makes fleet load fail.
