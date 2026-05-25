@@ -55,13 +55,14 @@ type Intent struct {
 // taken from the body; on update it comes from the URL path and any
 // body MAC is ignored.
 type MachineConfig struct {
-	MAC        string `json:"mac,omitempty"`
-	Name       string `json:"name"`
-	Boot       string `json:"boot"`
-	Preseed    string `json:"preseed,omitempty"`
-	Kickstart  string `json:"kickstart,omitempty"`
-	CloudInit  string `json:"cloud_init,omitempty"`
-	IPXEScript string `json:"ipxe_script,omitempty"`
+	MAC        string            `json:"mac,omitempty"`
+	Name       string            `json:"name"`
+	Boot       string            `json:"boot"`
+	Preseed    string            `json:"preseed,omitempty"`
+	Kickstart  string            `json:"kickstart,omitempty"`
+	CloudInit  string            `json:"cloud_init,omitempty"`
+	IPXEScript string            `json:"ipxe_script,omitempty"`
+	Params     map[string]string `json:"params,omitempty"`
 }
 
 // ListResponse is the body of GET /api/v1/machines. Total is the full

@@ -68,6 +68,7 @@ func (f *Fleet) Save() error {
 			Preseed:    relativize(f.baseDir, f.defaults.Preseed),
 			Kickstart:  relativize(f.baseDir, f.defaults.Kickstart),
 			IPXEScript: relativize(f.baseDir, f.defaults.IPXEScript),
+			Params:     f.defaults.Params,
 		},
 	}
 	for canon, p := range f.machines {
@@ -79,6 +80,10 @@ func (f *Fleet) Save() error {
 			Preseed:    relativize(f.baseDir, p.Preseed),
 			Kickstart:  relativize(f.baseDir, p.Kickstart),
 			IPXEScript: relativize(f.baseDir, p.IPXEScript),
+			// p.Params here is the machine's OWN params (Lookup does
+			// the defaults-merge on read; the stored map is own-only),
+			// so this round-trips without denormalizing defaults.
+			Params: p.Params,
 		})
 	}
 	f.mu.RUnlock()

@@ -226,6 +226,64 @@ curl http://127.0.0.1:8080/autoinstall/58-47-ca-70-c7-c9/user-data
 **Live config reload:** edit `fleet.yaml`, then `kill -HUP $(pgrep -x pxe-beacon)`.
 No restart needed — the next OFFER picks up the new config.
 
+### Per-machine params (v0.10.0+)
+
+When several machines share a preseed / cloud-init / kickstart but
+differ by a few values (hostname, static IP, SSH key), use a `params:`
+map instead of N near-duplicate files. Params are exposed to the
+templates as `{{.Params.key}}`:
+
+```yaml
+defaults:
+  params:
+    domain: lab.local        # fleet-wide; merged into every machine
+
+machines:
+  - mac: "58:47:ca:70:c7:c9"
+    name: kube-1
+    boot: debian-12
+    preseed: ./worker.cfg     # one template, many machines
+    params:
+      hostname: kube-1
+      address: "10.69.7.11"
+```
+
+```
+# in worker.cfg:
+d-i netcfg/get_hostname string {{.Params.hostname}}
+d-i netcfg/get_ipaddress string {{.Params.address}}
+# {{.Params.domain}} comes from defaults
+```
+
+`defaults.params` merge with machine-level params; the machine wins on
+a key collision. Values are substituted literally — you own escaping.
+Set them via `fleet.yaml`, the `/admin` form, or `params` in the API's
+`MachineConfig` body.
+
+### Run via Docker (v0.10.0+)
+
+Multi-arch images are published to GHCR on each release:
+
+```bash
+docker run --network host \
+  --cap-add NET_BIND_SERVICE \
+  -v /etc/pxe-beacon:/etc/pxe-beacon \
+  -v pxe-beacon-data:/var/lib/pxe-beacon \
+  ghcr.io/venkatamutyala/pxe-beacon:latest \
+  -config /etc/pxe-beacon/fleet.yaml
+```
+
+Two flags are **non-negotiable**, not conveniences:
+- `--network host` — proxyDHCP DISCOVER is a broadcast; Docker's
+  userland-proxy NAT silently drops it, so the container must share the
+  host network namespace.
+- `--cap-add NET_BIND_SERVICE` — UDP 67/69/4011 are privileged ports.
+
+The image runs as a non-root user (`setcap` grants the port capability)
+and `VOLUME`s `/var/lib/pxe-beacon`, where `pxe-beacon fetch` writes
+distro assets and `/admin` writes template overrides — mount it to a
+named volume so a multi-GB fetch survives container restarts.
+
 ### Boot intent (v0.8.0+)
 
 Machines in `fleet.yaml` are **idle by default** — pxe-beacon ignores

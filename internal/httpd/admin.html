@@ -193,6 +193,14 @@ document.getElementById('save-machine').addEventListener('submit', async (e) => 
   e.preventDefault();
   const get = id => document.getElementById(id).value.trim();
   const mac = get('mac');
+  // params textarea: one key=value per line → {key: value} object.
+  const params = {};
+  get('params').split('\n').forEach(line => {
+    const t = line.trim();
+    if (!t) return;
+    const i = t.indexOf('=');
+    if (i > 0) params[t.slice(0, i).trim()] = t.slice(i + 1).trim();
+  });
   const payload = {
     mac,
     name: get('name'),
@@ -201,6 +209,7 @@ document.getElementById('save-machine').addEventListener('submit', async (e) => 
     kickstart: get('kickstart'),
     cloud_init: get('cloud_init'),
     ipxe_script: get('ipxe_script'),
+    params,
   };
   // Probe existence to choose create (POST) vs update (PUT+If-Match).
   const probe = await fetch('/api/v1/machines/' + encodeURIComponent(mac));
@@ -255,6 +264,9 @@ document.getElementById('save-machine').addEventListener('submit', async (e) => 
 
   <label for="ipxe_script">ipxe_script</label>
   <input id="ipxe_script" name="ipxe_script" type="text" placeholder="(required for boot: custom)">
+
+  <label for="params">params</label>
+  <textarea id="params" name="params" rows="3" style="min-height:auto" placeholder="one key=value per line, e.g.&#10;hostname=kube-1&#10;disk=/dev/nvme0n1&#10;(used in templates via .Params.hostname)"></textarea>
 
   <div class="buttons">
     <button type="submit" class="primary">save</button>

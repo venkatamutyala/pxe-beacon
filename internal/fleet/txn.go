@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 )
 
 // v0.9.0 transactional CRUD + ETag support.
@@ -46,7 +47,9 @@ func (f *Fleet) ETag(mac string) (etag string, exists bool) {
 }
 
 // profileETag computes the weak ETag for one entry. Fixed field order;
-// NUL-separated so no field-boundary ambiguity.
+// NUL-separated so no field-boundary ambiguity. Params are hashed with
+// keys in sorted order so the tag is deterministic across map iteration
+// (and so editing a param changes the tag — required for If-Match).
 func profileETag(canonMAC string, p Profile) string {
 	h := sha256.New()
 	for _, s := range []string{
@@ -54,6 +57,17 @@ func profileETag(canonMAC string, p Profile) string {
 		p.CloudInit, p.Preseed, p.Kickstart, p.IPXEScript,
 	} {
 		h.Write([]byte(s))
+		h.Write([]byte{0})
+	}
+	keys := make([]string, 0, len(p.Params))
+	for k := range p.Params {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		h.Write([]byte(k))
+		h.Write([]byte{0})
+		h.Write([]byte(p.Params[k]))
 		h.Write([]byte{0})
 	}
 	sum := h.Sum(nil)

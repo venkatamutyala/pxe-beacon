@@ -547,6 +547,22 @@ func TestAPI_CRUD_FullCycle(t *testing.T) {
 	}
 }
 
+func TestAPI_CreateMachine_WithParams(t *testing.T) {
+	srv, _, fl := newAPIServer(t)
+	mac := "aa:bb:cc:dd:ee:0a"
+
+	w := doLoopback(srv, "POST", "/api/v1/machines",
+		`{"mac":"`+mac+`","name":"p1","boot":"debian-12","params":{"hostname":"p1","disk":"/dev/nvme0n1"}}`)
+	if w.Code != 201 {
+		t.Fatalf("create with params: status %d body=%s", w.Code, w.Body.String())
+	}
+	// The stored profile carries the params, and Lookup exposes them.
+	p := fl.Lookup(mac)
+	if p.Params["hostname"] != "p1" || p.Params["disk"] != "/dev/nvme0n1" {
+		t.Errorf("params not stored: %+v", p.Params)
+	}
+}
+
 func TestAPI_CreateMachine_RejectsNonJSON(t *testing.T) {
 	srv, _, _ := newAPIServer(t)
 	// Form-encoded body → 415 (the CSRF defense).

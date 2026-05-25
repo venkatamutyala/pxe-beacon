@@ -81,6 +81,14 @@ type Profile struct {
 	// boot==custom; empty otherwise.
 	IPXEScript string
 
+	// Params is a freeform per-machine string map exposed to the
+	// preseed / cloud-init / kickstart templates as {{.Params.key}}.
+	// v0.10.0+. Lets one template serve many machines that differ only
+	// by hostname / static IP / SSH key / etc. defaults.params merge
+	// with machine-level params; machine wins on key collision.
+	// Substituted literally — the operator owns escaping.
+	Params map[string]string
+
 	// IsDefault is true when this profile came from `defaults:` (i.e.
 	// the MAC is unknown to the fleet config). Useful for logging.
 	IsDefault bool
@@ -93,21 +101,23 @@ type configFile struct {
 }
 
 type defaultsEntry struct {
-	Boot       string `yaml:"boot"`
-	CloudInit  string `yaml:"cloud_init"`
-	Preseed    string `yaml:"preseed"`
-	Kickstart  string `yaml:"kickstart"`
-	IPXEScript string `yaml:"ipxe_script"`
+	Boot       string            `yaml:"boot"`
+	CloudInit  string            `yaml:"cloud_init"`
+	Preseed    string            `yaml:"preseed"`
+	Kickstart  string            `yaml:"kickstart"`
+	IPXEScript string            `yaml:"ipxe_script"`
+	Params     map[string]string `yaml:"params"`
 }
 
 type machineYAML struct {
-	MAC        string `yaml:"mac"`
-	Name       string `yaml:"name"`
-	Boot       string `yaml:"boot"`
-	CloudInit  string `yaml:"cloud_init"`
-	Preseed    string `yaml:"preseed"`
-	Kickstart  string `yaml:"kickstart"`
-	IPXEScript string `yaml:"ipxe_script"`
+	MAC        string            `yaml:"mac"`
+	Name       string            `yaml:"name"`
+	Boot       string            `yaml:"boot"`
+	CloudInit  string            `yaml:"cloud_init"`
+	Preseed    string            `yaml:"preseed"`
+	Kickstart  string            `yaml:"kickstart"`
+	IPXEScript string            `yaml:"ipxe_script"`
+	Params     map[string]string `yaml:"params"`
 }
 
 // Fleet is the live in-memory store. It satisfies the lookup
@@ -209,6 +219,7 @@ func (f *Fleet) reload() error {
 		Preseed:    resolvePath(baseDir, cfg.Defaults.Preseed),
 		Kickstart:  resolvePath(baseDir, cfg.Defaults.Kickstart),
 		IPXEScript: resolvePath(baseDir, cfg.Defaults.IPXEScript),
+		Params:     mergeParams(nil, cfg.Defaults.Params),
 		IsDefault:  true,
 	}
 	if err := validateProfile(defProfile, "defaults"); err != nil {
@@ -242,6 +253,11 @@ func (f *Fleet) reload() error {
 			Preseed:    resolvePath(baseDir, m.Preseed),
 			Kickstart:  resolvePath(baseDir, m.Kickstart),
 			IPXEScript: resolvePath(baseDir, m.IPXEScript),
+			// Store the machine's OWN params here (a copy). The merge
+			// with defaults happens in Lookup at read time, so Save()
+			// round-trips the file without baking defaults into every
+			// machine entry.
+			Params: mergeParams(nil, m.Params),
 		}
 		if err := validateProfile(p, ctx); err != nil {
 			return err
@@ -337,19 +353,24 @@ func validateProfile(p Profile, ctx string) error {
 
 // Lookup resolves a MAC (in any common format) to a Profile. Unknown
 // MACs get the defaults profile. Lock-protected; cheap to call.
+//
+// v0.10.0: the returned Profile's Params is the merge of defaults.params
+// with the machine's own params (machine wins) — so template rendering
+// sees the effective set, while the stored map keeps only the machine's
+// own params for clean round-trip on Save.
 func (f *Fleet) Lookup(mac string) Profile {
-	canon, err := CanonicalMAC(mac)
-	if err != nil {
-		f.mu.RLock()
-		defer f.mu.RUnlock()
-		return f.defaults
-	}
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	if p, ok := f.machines[canon]; ok {
-		return p
+	canon, err := CanonicalMAC(mac)
+	if err != nil {
+		return f.defaults
 	}
-	return f.defaults
+	p, ok := f.machines[canon]
+	if !ok {
+		return f.defaults
+	}
+	p.Params = mergeParams(f.defaults.Params, p.Params)
+	return p
 }
 
 // Machines returns a snapshot copy of every configured machine
@@ -421,6 +442,23 @@ func resolvePath(base, p string) string {
 		return p
 	}
 	return filepath.Join(base, p)
+}
+
+// mergeParams returns base overlaid with over (over wins on key
+// collision). Returns nil when both are empty, so a paramless machine
+// has Params == nil rather than an empty map (cleaner round-trip).
+func mergeParams(base, over map[string]string) map[string]string {
+	if len(base) == 0 && len(over) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(base)+len(over))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range over {
+		out[k] = v
+	}
+	return out
 }
 
 func knownTargetsSorted() []string {

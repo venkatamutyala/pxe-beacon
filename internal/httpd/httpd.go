@@ -407,6 +407,7 @@ func (s *Server) handleUserData(w http.ResponseWriter, r *http.Request) {
 		"MACHyp":       strings.ReplaceAll(mac, ":", "-"),
 		"AdvertisedIP": s.opts.AdvertisedIP,
 		"HTTPPort":     s.opts.HTTPPort,
+		"Params":       p.Params,
 	}); err != nil {
 		http.Error(w, fmt.Sprintf("render cloud_init: %v", err), http.StatusInternalServerError)
 		return
@@ -457,6 +458,7 @@ func (s *Server) handlePreseed(w http.ResponseWriter, r *http.Request) {
 		"HTTPPort":         s.opts.HTTPPort,
 		"ClientNetmask":    s.opts.ClientNetmask,
 		"WiderNetworkCIDR": widerNetworkCIDR(s.opts.AdvertisedIP, s.opts.ClientNetmask),
+		"Params":           p.Params,
 	}
 
 	var body []byte

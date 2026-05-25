@@ -212,6 +212,10 @@ components:
         kickstart: { type: string }
         cloud_init: { type: string }
         ipxe_script: { type: string }
+        params:
+          type: object
+          additionalProperties: { type: string }
+          description: "per-machine template vars, referenced as {{.Params.key}} in preseed/cloud-init/kickstart"
     Error:
       type: object
       required: [code, message]

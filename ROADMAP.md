@@ -39,28 +39,32 @@ These apply to every PR until further notice:
 
 ---
 
-## Next: "Config, rescue, packaging" (features)
+## v0.10.0 — "Config + packaging" ✅ SHIPPED
 
-**Theme:** Per-machine config + real rescue + the security/packaging
-basics. BMC/power removed (deferred). The v0.8.2 quick-win bugfixes
-(404→503, encode-error, etc.) already shipped inside v0.9.0.
-**Estimate:** ~2 weeks.
-**Headline:** "Per-machine config, real rescue, tokens, container."
+**Shipped:** per-machine `params:` map (nested `{{.Params.key}}`,
+defaults-merge with machine-wins, round-trips cleanly because Lookup
+merges at read time while the stored map keeps only own-params; ETag
+includes sorted params; settable via fleet.yaml / API / admin form)
+and the multi-arch container image (GHCR, non-root + setcap,
+`VOLUME /var/lib/pxe-beacon`, `--network host` + `--cap-add` documented).
+
+## Next: "Rescue + secure callbacks" (features)
+
+**Theme:** Real rescue + authenticate the phone-home callback.
+**Estimate:** ~1.5 weeks.
 
 ### Items
 
 | # | Item | Why | Effort |
 |---|---|---|---|
-| 1 | **`params:` map in `machineYAML`** + Go template substitution into preseed / cloud-init / kickstart | Foreman expert's #1 ask. Today N machines with N hostnames = N preseed copies. One map, one merge. Needs a short templating RFC (Go templates, escaping, schema versioning). | small |
-| 2 | **Real SystemRescue rescue boot target** in `dispatch.go` + un-501 the API | One global arm (rescue isn't per-machine). Use SystemRescue HTTP mirror, `archisobasedir=sysresccd` cmdline. Un-501 the `rescue` intent handler. | small |
-| 3 | **Bootstrap tokens for the phone-home callback** (`/events` + `/done` alias) | HMAC-derived from server secret (`HMAC-SHA256(serverSecret, mac \|\| requestedAt-truncated-to-ttl)`). Survives restart, no on-disk state, naturally TTL-bound. Templated into cloud-init via the callback URL. Constant-time compare; mismatch → 403, no state change. Today the callback is unauthenticated. | medium |
-| 4 | **`POST /autoinstall/{mac}/log` capture endpoint** | DC's missing-diagnostic gap. Cloud-init `runcmd` posts kernel ring buffer + cloud-init logs on success AND on `errors:` hook. In-memory ring per MAC, viewable via `/api/v1/machines/{mac}/logs` (last ~64KB). | small |
-| 5 | **Container image** | Multi-stage Dockerfile, `setcap cap_net_bind_service+ep` before `USER nonroot`, `VOLUME /var/lib/pxe-beacon`, `EXPOSE 67/udp 69/udp 4011/udp 8080/tcp`, README docs `--network host` + `--cap-add=NET_BIND_SERVICE`. GHCR push in release matrix. | small |
+| 1 | **Real SystemRescue rescue boot target** in `dispatch.go` + un-501 the API | One global arm (rescue isn't per-machine). Fetch SystemRescue into `-data-dir` via a new `pxe-beacon fetch systemrescue` target (don't hot-fetch — flaky CDN); serve via `/assets/systemrescue/`. Access via SystemRescue's native autoconfig YAML (root pw / SSH key / sshd), generated per-machine the same way cloud-init is — SystemRescue isn't a cloud-init system, but the delivery pattern is reused. SSH key can come from `params:`. | medium |
+| 2 | **Bootstrap tokens for the phone-home callback** (`/events` + `/done` alias) | Signed token carrying its own timestamp (HMAC-SHA256 over mac+timestamp, server secret from `$PXE_BEACON_TOKEN_SECRET` with logged random fallback). Templated into cloud-init via the callback URL. Constant-time compare; mismatch → 403, no state change. Today the callback is unauthenticated. | medium |
+| 3 | **`POST /autoinstall/{mac}/log` capture endpoint** | DC's missing-diagnostic gap. Cloud-init `runcmd` posts kernel ring buffer + cloud-init logs on success AND on `errors:` hook. In-memory ring per MAC, viewable via `/api/v1/machines/{mac}/logs` (last ~64KB). Auth: the same bootstrap token as #2. | small |
 
 ### Out of scope
 
 - BMC integration + `POST /power` — deferred (see bottom).
-- Persistence — next release.
+- Persistence — following release.
 
 ---
 

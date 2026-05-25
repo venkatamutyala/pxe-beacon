@@ -254,6 +254,7 @@ func (s *Server) profileFromBody(w http.ResponseWriter, r *http.Request, b pxebe
 		Kickstart:  resolve(b.Kickstart),
 		CloudInit:  resolve(b.CloudInit),
 		IPXEScript: resolve(b.IPXEScript),
+		Params:     b.Params,
 	}, true
 }
 

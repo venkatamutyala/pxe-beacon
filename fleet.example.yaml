@@ -1,0 +1,53 @@
+# fleet.example.yaml — a worked pxe-beacon fleet config.
+#
+# Start the server with:  sudo ./pxe-beacon -config ./fleet.example.yaml
+# Hand-edits are fine; SIGHUP $(pgrep -x pxe-beacon) to reload, or use
+# the /admin UI (which writes this file back — note UI saves drop
+# comments).
+
+defaults:
+  # Unknown MACs (not listed below) fall through to the netboot.xyz
+  # interactive menu — same as v0.1.3 single-machine behavior.
+  boot: menu
+
+  # Fleet-wide template variables. Merged into every machine's params
+  # (machine-level keys win). Referenced in preseed / cloud-init /
+  # kickstart templates as {{.Params.key}}.
+  params:
+    domain: lab.local
+    dns: "10.69.0.1"
+
+machines:
+  # Two near-identical Debian workers that differ only by hostname +
+  # static-IP hint — one preseed template serves both via params,
+  # instead of two near-duplicate files.
+  - mac: "58:47:ca:70:c7:c9"
+    name: kube-1
+    boot: debian-12
+    preseed: ./examples/debian-worker.cfg     # uses {{.Params.hostname}} etc.
+    cloud_init: ./examples/worker-cloud-init.yaml
+    params:
+      hostname: kube-1
+      address: "10.69.7.11"
+
+  - mac: "aa:bb:cc:dd:ee:02"
+    name: kube-2
+    boot: debian-12
+    preseed: ./examples/debian-worker.cfg
+    cloud_init: ./examples/worker-cloud-init.yaml
+    params:
+      hostname: kube-2
+      address: "10.69.7.12"
+      dns: "10.69.0.2"                         # overrides the fleet default
+
+  # A Rocky box via Anaconda + Kickstart (embedded default kickstart
+  # used when `kickstart:` is omitted).
+  - mac: "aa:bb:cc:dd:ee:03"
+    name: db-1
+    boot: rocky-9
+    cloud_init: ./examples/db-cloud-init.yaml
+
+  # A rescue/utility box that just chains the netboot.xyz menu.
+  - mac: "11:22:33:44:55:66"
+    name: jumpbox
+    boot: menu

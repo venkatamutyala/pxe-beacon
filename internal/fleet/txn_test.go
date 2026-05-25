@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -133,6 +134,67 @@ func TestDeleteAndSave_IfMatch(t *testing.T) {
 	existed, err := f.DeleteAndSave(mac, etag)
 	if err != nil || !existed {
 		t.Fatalf("delete correct If-Match: existed=%v err=%v", existed, err)
+	}
+}
+
+func TestParams_MergeAndRoundTrip(t *testing.T) {
+	// defaults.params merge with machine params (machine wins); the
+	// machine's stored params stay own-only so Save round-trips
+	// without baking defaults into every entry.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fleet.yaml")
+	if err := os.WriteFile(path, []byte(`
+defaults:
+  boot: menu
+  params:
+    domain: lab.local
+    dns: 10.0.0.1
+machines:
+  - mac: 58:47:ca:70:c7:c9
+    name: kube-1
+    boot: debian-12
+    params:
+      hostname: kube-1
+      dns: 10.0.0.2
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := Load(path, narrlog.New("test", narrlog.LevelError, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Lookup returns the MERGED params (machine wins on dns).
+	p := f.Lookup("58:47:ca:70:c7:c9")
+	want := map[string]string{"domain": "lab.local", "dns": "10.0.0.2", "hostname": "kube-1"}
+	for k, v := range want {
+		if p.Params[k] != v {
+			t.Errorf("merged params[%q] = %q, want %q", k, p.Params[k], v)
+		}
+	}
+
+	// Save + reload: the merge still holds and the machine's own
+	// params didn't absorb the default 'domain' (no denormalization).
+	if err := f.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	p2 := f.Lookup("58:47:ca:70:c7:c9")
+	if p2.Params["domain"] != "lab.local" {
+		t.Errorf("after round-trip, merged domain = %q, want lab.local", p2.Params["domain"])
+	}
+	if p2.Params["dns"] != "10.0.0.2" {
+		t.Errorf("after round-trip, machine dns override lost: %q", p2.Params["dns"])
+	}
+
+	// Confirm the on-disk machine entry holds ONLY its own params
+	// (defaults not baked in): re-read raw and assert the machine
+	// block doesn't carry 'domain'.
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), "hostname: kube-1") {
+		t.Errorf("expected machine's own param in file:\n%s", raw)
 	}
 }
 
