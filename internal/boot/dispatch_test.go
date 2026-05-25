@@ -275,23 +275,31 @@ machines:
 }
 
 func TestDispatch_ARM64_HardRefuse(t *testing.T) {
-	// v0.8.1: dispatch script emits a two-line iseq allowlist at the
-	// top, before the per-MAC dispatch. ${buildarch} not in {i386,
-	// x86_64} hits a reboot block.
+	// v0.14.2: dispatch emits an arch DENYLIST at the top (before the
+	// per-MAC dispatch) — refuse only arm, fail open for x86. The old
+	// allowlist failed closed and rebooted x86 boxes with an unexpected
+	// ${buildarch} (regression vs v0.6.16).
 	out := RenderDispatch(nil, dispatchCtx())
 	s := string(out)
 
-	// The allowlist lines must use the documented one-iseq-per-line
-	// pattern (chained `||`/`&&` doesn't work in iPXE — v0.5.14 bug).
+	// One-iseq-per-line denylist (chained `||`/`&&` doesn't work in
+	// iPXE — v0.5.14 bug). arm refused; everything else goes arch_ok.
 	for _, want := range []string{
-		"iseq ${buildarch} i386   && goto arch_ok",
-		"iseq ${buildarch} x86_64 && goto arch_ok",
+		"iseq ${buildarch} arm64 && goto arch_refuse",
+		"iseq ${buildarch} arm32 && goto arch_refuse",
+		"goto arch_ok",
+		":arch_refuse",
 		"UNSUPPORTED ARCH",
 		":arch_ok",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("dispatch missing %q:\n%s", want, s)
 		}
+	}
+
+	// Regression guard: x86 must NOT be gated by a fail-closed allowlist.
+	if strings.Contains(s, "&& goto arch_ok") {
+		t.Error("arch gate must be a denylist (refuse arm), not an allowlist that fails closed for x86")
 	}
 
 	// The arch check must come BEFORE the stage-0 settings dump (the

@@ -68,20 +68,24 @@ func renderDispatchProduction(f *fleet.Fleet, ctx DispatchContext) []byte {
 	w("#!ipxe")
 	w("# pxe-beacon dispatch — generated per request from fleet.yaml.")
 	w("")
-	// v0.8.1: ARM64 hard-refuse. Two-line iseq allowlist (NOT chained
-	// `||`/`&&` — those don't have bash precedence in iPXE; see the
-	// v0.5.14 comment further down in this file for the prior bug).
-	// ${buildarch} is i386 on legacy-BIOS x86 (iPXE is 32-bit even on
-	// x86_64 BIOS) and x86_64 on UEFI x86_64. Anything else (arm64,
-	// arm, etc.) hits the refuse block and reboots after a notice —
-	// our dispatch arms hardcode amd64 mirrors and the box would
-	// silently brick if we proceeded.
-	w("# v0.8.1: arch allowlist (proper multi-arch is a future release).")
-	w("iseq ${buildarch} i386   && goto arch_ok")
-	w("iseq ${buildarch} x86_64 && goto arch_ok")
+	// Refuse ARM (dispatch arms hardcode amd64 mirrors). v0.14.2 makes
+	// this a DENYLIST after a regression: the v0.8.1 version was an
+	// allowlist (`iseq ${buildarch} i386/x86_64 && goto arch_ok`, else
+	// reboot) that failed CLOSED — it rebooted any x86 box whose iPXE
+	// reports a ${buildarch} other than exactly i386/x86_64 (empty or an
+	// unexpected value on some snponly builds), so machines that booted
+	// fine at v0.6.16 silently rebooted to local disk. Refuse only arm;
+	// everything else (x86, or an unknown/empty buildarch) proceeds.
+	// One iseq per line — chained `&&`/`||` don't follow bash precedence
+	// in iPXE (see the v0.5.14 note further down).
+	w("# v0.14.2: arch denylist — refuse arm only, fail open for x86.")
+	w("iseq ${buildarch} arm64 && goto arch_refuse")
+	w("iseq ${buildarch} arm32 && goto arch_refuse")
+	w("goto arch_ok")
+	w(":arch_refuse")
 	w("echo")
 	w("echo ===== UNSUPPORTED ARCH =====")
-	w("echo pxe-beacon v0.8.1 supports amd64/x86_64 only; got buildarch=${buildarch}")
+	w("echo pxe-beacon supports amd64/x86_64 only; got buildarch=${buildarch}")
 	w("echo multi-arch tracked for a future release; rebooting in 30s")
 	w("sleep 30")
 	w("reboot")
